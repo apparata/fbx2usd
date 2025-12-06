@@ -749,7 +749,7 @@ def convert_fbx_to_usd(fbx_path, usd_path):
 
 def main():
     if len(sys.argv) < 3:
-        print("Usage: fbx2usd_final.py <input.fbx> <output.usd[a|c]>")
+        print("Usage: fbx2usd <input.fbx> <output.usd[a|c]>")
         print("\nMatches the exact structure of working BusinessMan.usda:")
         print("- Animation is CHILD of Skeleton")
         print("- metersPerUnit = 0.01")

@@ -6,6 +6,7 @@ A Python command-line tool for converting FBX files with skeletal animations to 
 
 - **Skeletal Animation Support**: Preserves complete skeletal hierarchies and bind poses
 - **Multiple Animation Takes**: Concatenates multiple animation takes into a single timeline
+- **RealityKit Compatible**: Creates animation libraries with clip definitions
 - **PBR Materials**: Converts materials with support for:
   - Diffuse/Albedo textures
   - Normal maps
@@ -15,7 +16,6 @@ A Python command-line tool for converting FBX files with skeletal animations to 
   - Ambient Occlusion maps
 - **Mesh Export**: Exports geometry with normals and multiple UV sets
 - **Skinning Weights**: Preserves skinning data (up to 4 influences per vertex)
-- **RealityKit Compatible**: Creates animation libraries with clip definitions
 - **Flexible Output**: Supports USD, USDA (ASCII), and USDC (compressed) formats
 - **Unit Conversion**: Handles unit conversion (defaults to centimeters with metersPerUnit = 0.01)
 
@@ -23,7 +23,8 @@ A Python command-line tool for converting FBX files with skeletal animations to 
 
 ### Python Dependencies
 
-- Python 3.7 or higher
+- macOS 26 or higher
+- Python 3.10 or higher
 - Pixar USD library (`usd-core`)
 - Autodesk FBX SDK Python bindings
 
@@ -49,10 +50,10 @@ A Python command-line tool for converting FBX files with skeletal animations to 
 
 ### Option 1: Direct Usage
 
-Simply download `fbx2usd.py` and run it directly:
+Simply download `fbx2usd` and run it directly:
 
 ```bash
-python fbx2usd.py input.fbx output.usd
+python3 fbx2usd input.fbx output.usdc
 ```
 
 ### Option 2: Install as Package
@@ -68,7 +69,7 @@ pip install -e .
 This will make the `fbx2usd` command available system-wide:
 
 ```bash
-fbx2usd input.fbx output.usd
+fbx2usd input.fbx output.usdc
 ```
 
 ## Usage
@@ -78,39 +79,39 @@ fbx2usd input.fbx output.usd
 Convert an FBX file to USD:
 
 ```bash
-python fbx2usd.py input.fbx output.usd
+python3 fbx2usd input.fbx output.usdc
 ```
 
 ### Output Formats
 
 The tool automatically determines the output format based on the file extension:
 
-- `.usd` - Binary USD format
 - `.usda` - ASCII USD format (human-readable)
-- `.usdc` - Compressed USD format
+- `.usdc` - Binary USD format
 
 ```bash
-python fbx2usd.py model.fbx model.usda  # ASCII output
-python fbx2usd.py model.fbx model.usdc  # Compressed output
+python3 fbx2usd model.fbx model.usda  # ASCII output
+python3 fbx2usd model.fbx model.usdc  # Compressed output
 ```
 
 ### Examples
 
 Convert a character with animations:
 ```bash
-python fbx2usd.py character_with_anims.fbx character.usd
+python3 fbx2usd character_with_anims.fbx character.usdc
 ```
 
 Convert to ASCII format for inspection:
 ```bash
-python fbx2usd.py model.fbx model.usda
+python3 fbx2usd model.fbx model.usda
 ```
 
 ## How It Works
 
 The converter performs the following operations:
 
-1. **Scene Loading**: Loads the FBX file using the Autodesk FBX SDK
+1. **Scene Loading**:
+   - Loads the FBX file using the Autodesk FBX SDK
 2. **Skeleton Export**:
    - Extracts skeletal hierarchy
    - Preserves bind transforms and rest poses
@@ -127,7 +128,8 @@ The converter performs the following operations:
    - Concatenates all animation takes into a single timeline
    - Samples skeletal transformations at 30 FPS
    - Creates RealityKit animation library with clip definitions
-6. **USD Writing**: Outputs the complete scene in USD format
+6. **USD Writing**:
+   - Outputs the complete scene in USD format
 
 ## Limitations
 
@@ -159,14 +161,6 @@ This project is licensed under the 0BSD License - see the [LICENSE](LICENSE) fil
 
 - **Pixar USD**: Apache 2.0 License
 - **Autodesk FBX SDK**: Proprietary license from Autodesk (users must agree to Autodesk's terms)
-
-## Contributing
-
-Contributions are welcome! Feel free to submit issues or pull requests.
-
-## Author
-
-Martin Johannesson
 
 ## Acknowledgments
 
