@@ -97,3 +97,6 @@ dmypy.json
 
 # Pyre type checker
 .pyre/
+
+# Claude
+.claude/settings.local.json
