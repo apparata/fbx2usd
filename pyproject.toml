@@ -1,0 +1,43 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "fbx2usd"
+version = "1.0.0"
+description = "Convert FBX files with skeletal animations to USD format for RealityKit"
+readme = "README.md"
+license = {text = "0BSD"}
+authors = [
+    {name = "Martin Johannesson"}
+]
+requires-python = ">=3.7"
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Topic :: Multimedia :: Graphics :: 3D Modeling",
+    "Topic :: Multimedia :: Graphics :: Graphics Conversion",
+    "License :: OSI Approved :: BSD License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.7",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+]
+keywords = ["fbx", "usd", "usda", "usdc", "realitykit", "3d", "animation", "converter"]
+dependencies = [
+    "usd-core>=24.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/yourusername/fbx2usd"
+Repository = "https://github.com/yourusername/fbx2usd.git"
+Issues = "https://github.com/yourusername/fbx2usd/issues"
+
+[project.scripts]
+fbx2usd = "fbx2usd:main"
+
+[tool.setuptools]
+py-modules = ["fbx2usd"]

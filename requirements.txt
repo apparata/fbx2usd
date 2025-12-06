@@ -1,0 +1,6 @@
+# USD (Universal Scene Description) library
+usd-core>=24.0
+
+# Note: Autodesk FBX SDK Python bindings must be installed manually
+# Download from: https://www.autodesk.com/developer-network/platform-technologies/fbx-sdk-2020-2-1
+# The FBX SDK is not available via pip and requires separate installation

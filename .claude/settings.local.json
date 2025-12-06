@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git -C /Users/martinjohannesson/Projekt/git/Tools/fbx2usd log --oneline --all)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}
