@@ -16,7 +16,7 @@ A Python command-line tool for converting FBX files with skeletal animations to 
   - Ambient Occlusion maps
 - **Mesh Export**: Exports geometry with normals and multiple UV sets
 - **Skinning Weights**: Preserves skinning data (up to 4 influences per vertex)
-- **Flexible Output**: Supports USD, USDA (ASCII), and USDC (compressed) formats
+- **Flexible Output**: Supports binary USDC and human-readable ascii USDA formats
 - **Unit Conversion**: Handles unit conversion (defaults to centimeters with metersPerUnit = 0.01)
 
 ## Requirements
