@@ -15,6 +15,7 @@ A Python command-line tool for converting FBX files with skeletal animations to 
   - Metallic maps
   - Emissive maps
   - Ambient Occlusion maps
+- **MaterialX Support**: Optional MaterialX shader export for Reality Composer Pro ShaderGraph compatibility
 - **Mesh Export**: Exports geometry with normals and multiple UV sets
 - **Skinning Weights**: Preserves skinning data (up to 4 influences per vertex)
 - **Flexible Output**: Supports binary USDC and human-readable ascii USDA formats
@@ -132,6 +133,22 @@ Convert to ASCII format for inspection:
 python3 fbx2usd model.fbx model.usda
 ```
 
+### MaterialX Export
+
+Use the `-m` or `--materialx` flag to export materials using MaterialX shaders instead of UsdPreviewSurface. This creates materials that are editable in Reality Composer Pro's ShaderGraph editor:
+
+```bash
+python3 fbx2usd -m -s character.fbx output/Character.usda
+```
+
+MaterialX export uses RealityKit-specific shader nodes:
+- `ND_realitykit_pbr_surfaceshader` - PBR surface shader
+- `ND_RealityKitTexture2D_color3` - Color texture sampler
+- `ND_RealityKitTexture2D_float` - Single-channel texture sampler
+- `ND_normal_map_decode` - Normal map decoder
+
+**Note**: MaterialX is primarily useful when you want to edit materials in Reality Composer Pro's visual ShaderGraph. For general use, the default UsdPreviewSurface materials are more widely compatible.
+
 ## How It Works
 
 The converter performs the following operations:
@@ -147,7 +164,7 @@ The converter performs the following operations:
    - Includes normals and multiple UV sets
    - Preserves skinning weights and joint influences
 4. **Material Conversion**:
-   - Creates USD Preview Surface materials
+   - Creates USD Preview Surface materials (default) or MaterialX shaders (`-m` flag)
    - Maps FBX material properties to PBR parameters
    - References texture files with proper paths
 5. **Animation Export**:

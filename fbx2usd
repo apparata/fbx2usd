@@ -93,7 +93,186 @@ def gf_matrix_from_fbx(m):
     )
 
 
-def convert_fbx_to_usd(fbx_path, usd_path):
+def create_materialx_material(stage, mat_path, fbx_material):
+    """Create a MaterialX material for a single FBX material"""
+    usd_material = UsdShade.Material.Define(stage, mat_path)
+
+    # Create PBR surface shader
+    pbr_path = f"{mat_path}/PBRSurface"
+    pbr_shader = UsdShade.Shader.Define(stage, pbr_path)
+    pbr_shader.CreateIdAttr("ND_realitykit_pbr_surfaceshader")
+
+    # Create outputs
+    pbr_output = pbr_shader.CreateOutput("out", Sdf.ValueTypeNames.Token)
+
+    # Connect material to PBR shader
+    mtlx_output = usd_material.CreateOutput("mtlx:surface", Sdf.ValueTypeNames.Token)
+    mtlx_output.ConnectToSource(pbr_output)
+
+    # Also create realitykit:vertex output (empty, but RCP expects it)
+    usd_material.CreateOutput("realitykit:vertex", Sdf.ValueTypeNames.Token)
+
+    # Diffuse/Base Color
+    diffuse_prop = fbx_material.FindProperty(FbxSurfaceMaterial.sDiffuse)
+    if diffuse_prop.IsValid():
+        texture_count = diffuse_prop.GetSrcObjectCount()
+        if texture_count > 0:
+            fbx_texture = diffuse_prop.GetSrcObject(0)
+            if isinstance(fbx_texture, FbxFileTexture):
+                texture_path = fbx_texture.GetFileName()
+                texture_name = os.path.basename(texture_path)
+
+                tex_path = f"{mat_path}/DiffuseTexture"
+                tex_shader = UsdShade.Shader.Define(stage, tex_path)
+                tex_shader.CreateIdAttr("ND_RealityKitTexture2D_color3")
+                tex_shader.CreateInput("file", Sdf.ValueTypeNames.Asset).Set(texture_name)
+                tex_shader.CreateInput("no_flip_v", Sdf.ValueTypeNames.Bool).Set(True)
+                tex_output = tex_shader.CreateOutput("out", Sdf.ValueTypeNames.Color3f)
+
+                base_color_input = pbr_shader.CreateInput("baseColor", Sdf.ValueTypeNames.Color3f)
+                base_color_input.ConnectToSource(tex_output)
+        else:
+            if isinstance(fbx_material, FbxSurfaceLambert):
+                diffuse_color = fbx_material.Diffuse.Get()
+                pbr_shader.CreateInput("baseColor", Sdf.ValueTypeNames.Color3f).Set(
+                    Gf.Vec3f(diffuse_color[0], diffuse_color[1], diffuse_color[2])
+                )
+
+    # Normal map (requires decode node)
+    normal_prop = fbx_material.FindProperty(FbxSurfaceMaterial.sNormalMap)
+    if normal_prop.IsValid():
+        texture_count = normal_prop.GetSrcObjectCount()
+        if texture_count > 0:
+            fbx_texture = normal_prop.GetSrcObject(0)
+            if isinstance(fbx_texture, FbxFileTexture):
+                texture_path = fbx_texture.GetFileName()
+                texture_name = os.path.basename(texture_path)
+
+                # Create normal texture node
+                normal_tex_path = f"{mat_path}/NormalTexture"
+                normal_tex = UsdShade.Shader.Define(stage, normal_tex_path)
+                normal_tex.CreateIdAttr("ND_RealityKitTexture2D_color3")
+                normal_tex.CreateInput("file", Sdf.ValueTypeNames.Asset).Set(texture_name)
+                normal_tex.CreateInput("no_flip_v", Sdf.ValueTypeNames.Bool).Set(True)
+                normal_tex_output = normal_tex.CreateOutput("out", Sdf.ValueTypeNames.Color3f)
+
+                # Create normal map decode node
+                decode_path = f"{mat_path}/NormalMapDecode"
+                decode_shader = UsdShade.Shader.Define(stage, decode_path)
+                decode_shader.CreateIdAttr("ND_normal_map_decode")
+                decode_input = decode_shader.CreateInput("in", Sdf.ValueTypeNames.Float3)
+                decode_input.ConnectToSource(normal_tex_output)
+                decode_output = decode_shader.CreateOutput("out", Sdf.ValueTypeNames.Float3)
+
+                # Connect to PBR shader
+                normal_input = pbr_shader.CreateInput("normal", Sdf.ValueTypeNames.Float3)
+                normal_input.ConnectToSource(decode_output)
+
+    # Roughness
+    roughness_set = False
+    roughness_prop = fbx_material.FindProperty("ShininessExponent")
+    if not roughness_prop.IsValid():
+        roughness_prop = fbx_material.FindProperty("Roughness")
+
+    if roughness_prop.IsValid():
+        texture_count = roughness_prop.GetSrcObjectCount()
+        if texture_count > 0:
+            fbx_texture = roughness_prop.GetSrcObject(0)
+            if isinstance(fbx_texture, FbxFileTexture):
+                texture_path = fbx_texture.GetFileName()
+                texture_name = os.path.basename(texture_path)
+
+                roughness_tex_path = f"{mat_path}/RoughnessTexture"
+                roughness_tex = UsdShade.Shader.Define(stage, roughness_tex_path)
+                roughness_tex.CreateIdAttr("ND_RealityKitTexture2D_float")
+                roughness_tex.CreateInput("file", Sdf.ValueTypeNames.Asset).Set(texture_name)
+                roughness_tex.CreateInput("no_flip_v", Sdf.ValueTypeNames.Bool).Set(True)
+                roughness_tex_output = roughness_tex.CreateOutput("out", Sdf.ValueTypeNames.Float)
+
+                roughness_input = pbr_shader.CreateInput("roughness", Sdf.ValueTypeNames.Float)
+                roughness_input.ConnectToSource(roughness_tex_output)
+                roughness_set = True
+
+    if not roughness_set and isinstance(fbx_material, FbxSurfacePhong):
+        try:
+            shininess = fbx_material.Shininess.Get()
+            roughness = 1.0 - min(shininess / 100.0, 1.0)
+            pbr_shader.CreateInput("roughness", Sdf.ValueTypeNames.Float).Set(max(0.0, min(1.0, roughness)))
+            roughness_set = True
+        except:
+            pass
+
+    if not roughness_set:
+        pbr_shader.CreateInput("roughness", Sdf.ValueTypeNames.Float).Set(0.5)
+
+    # Metallic
+    metallic_prop = fbx_material.FindProperty("Metallic")
+    if metallic_prop.IsValid():
+        texture_count = metallic_prop.GetSrcObjectCount()
+        if texture_count > 0:
+            fbx_texture = metallic_prop.GetSrcObject(0)
+            if isinstance(fbx_texture, FbxFileTexture):
+                texture_path = fbx_texture.GetFileName()
+                texture_name = os.path.basename(texture_path)
+
+                metallic_tex_path = f"{mat_path}/MetallicTexture"
+                metallic_tex = UsdShade.Shader.Define(stage, metallic_tex_path)
+                metallic_tex.CreateIdAttr("ND_RealityKitTexture2D_float")
+                metallic_tex.CreateInput("file", Sdf.ValueTypeNames.Asset).Set(texture_name)
+                metallic_tex.CreateInput("no_flip_v", Sdf.ValueTypeNames.Bool).Set(True)
+                metallic_tex_output = metallic_tex.CreateOutput("out", Sdf.ValueTypeNames.Float)
+
+                metallic_input = pbr_shader.CreateInput("metallic", Sdf.ValueTypeNames.Float)
+                metallic_input.ConnectToSource(metallic_tex_output)
+        else:
+            pbr_shader.CreateInput("metallic", Sdf.ValueTypeNames.Float).Set(0.0)
+    else:
+        pbr_shader.CreateInput("metallic", Sdf.ValueTypeNames.Float).Set(0.0)
+
+    # Emissive
+    emissive_prop = fbx_material.FindProperty(FbxSurfaceMaterial.sEmissive)
+    if emissive_prop.IsValid():
+        texture_count = emissive_prop.GetSrcObjectCount()
+        if texture_count > 0:
+            fbx_texture = emissive_prop.GetSrcObject(0)
+            if isinstance(fbx_texture, FbxFileTexture):
+                texture_path = fbx_texture.GetFileName()
+                texture_name = os.path.basename(texture_path)
+
+                emissive_tex_path = f"{mat_path}/EmissiveTexture"
+                emissive_tex = UsdShade.Shader.Define(stage, emissive_tex_path)
+                emissive_tex.CreateIdAttr("ND_RealityKitTexture2D_color3")
+                emissive_tex.CreateInput("file", Sdf.ValueTypeNames.Asset).Set(texture_name)
+                emissive_tex.CreateInput("no_flip_v", Sdf.ValueTypeNames.Bool).Set(True)
+                emissive_tex_output = emissive_tex.CreateOutput("out", Sdf.ValueTypeNames.Color3f)
+
+                emissive_input = pbr_shader.CreateInput("emissiveColor", Sdf.ValueTypeNames.Color3f)
+                emissive_input.ConnectToSource(emissive_tex_output)
+
+    # Ambient Occlusion
+    ao_prop = fbx_material.FindProperty("AmbientOcclusion")
+    if ao_prop.IsValid():
+        texture_count = ao_prop.GetSrcObjectCount()
+        if texture_count > 0:
+            fbx_texture = ao_prop.GetSrcObject(0)
+            if isinstance(fbx_texture, FbxFileTexture):
+                texture_path = fbx_texture.GetFileName()
+                texture_name = os.path.basename(texture_path)
+
+                ao_tex_path = f"{mat_path}/OcclusionTexture"
+                ao_tex = UsdShade.Shader.Define(stage, ao_tex_path)
+                ao_tex.CreateIdAttr("ND_RealityKitTexture2D_float")
+                ao_tex.CreateInput("file", Sdf.ValueTypeNames.Asset).Set(texture_name)
+                ao_tex.CreateInput("no_flip_v", Sdf.ValueTypeNames.Bool).Set(True)
+                ao_tex_output = ao_tex.CreateOutput("out", Sdf.ValueTypeNames.Float)
+
+                ao_input = pbr_shader.CreateInput("ambientOcclusion", Sdf.ValueTypeNames.Float)
+                ao_input.ConnectToSource(ao_tex_output)
+
+    return usd_material
+
+
+def convert_fbx_to_usd(fbx_path, usd_path, use_materialx=False):
     """Main conversion function"""
 
     # Load FBX
@@ -479,216 +658,227 @@ def convert_fbx_to_usd(fbx_path, usd_path):
                     if not stage.GetPrimAtPath(materials_scope_path):
                         UsdGeom.Scope.Define(stage, materials_scope_path)
 
-                    # Create or get material
-                    usd_material = UsdShade.Material.Define(stage, mat_path)
+                    # Skip if material already created
+                    if stage.GetPrimAtPath(mat_path):
+                        usd_material = UsdShade.Material.Get(stage, mat_path)
+                        UsdShade.MaterialBindingAPI(usd_mesh.GetPrim()).Bind(usd_material)
+                        continue
 
-                    # Create USD Preview Surface shader
-                    shader_path = f"{mat_path}/PreviewSurface"
-                    shader = UsdShade.Shader.Define(stage, shader_path)
-                    shader.CreateIdAttr("UsdPreviewSurface")
-
-                    # Create primvar reader for st coordinates (shared by all textures)
-                    primvar_reader_path = f"{mat_path}/PrimvarReader"
-                    primvar_reader = UsdShade.Shader.Define(stage, primvar_reader_path)
-                    primvar_reader.CreateIdAttr("UsdPrimvarReader_float2")
-                    primvar_reader.CreateInput("varname", Sdf.ValueTypeNames.String).Set("st")
-                    st_output = primvar_reader.CreateOutput("result", Sdf.ValueTypeNames.Float2)
-
-                    # Get diffuse color/texture
-                    diffuse_prop = fbx_material.FindProperty(FbxSurfaceMaterial.sDiffuse)
-                    if diffuse_prop.IsValid():
-                        # Check for texture
-                        texture_count = diffuse_prop.GetSrcObjectCount()
-                        if texture_count > 0:
-                            fbx_texture = diffuse_prop.GetSrcObject(0)
-                            if isinstance(fbx_texture, FbxFileTexture):
-                                # Get texture file path
-                                texture_path = fbx_texture.GetFileName()
-                                texture_name = os.path.basename(texture_path)
-
-                                # Create texture reader shader
-                                tex_reader_path = f"{mat_path}/DiffuseTexture"
-                                tex_reader = UsdShade.Shader.Define(stage, tex_reader_path)
-                                tex_reader.CreateIdAttr("UsdUVTexture")
-                                tex_reader.CreateInput("file", Sdf.ValueTypeNames.Asset).Set(texture_name)
-                                tex_reader.CreateInput("st", Sdf.ValueTypeNames.Float2).ConnectToSource(st_output)
-
-                                # Connect texture to diffuse color
-                                diffuse_output = tex_reader.CreateOutput("rgb", Sdf.ValueTypeNames.Float3)
-                                shader.CreateInput("diffuseColor", Sdf.ValueTypeNames.Color3f).ConnectToSource(diffuse_output)
-                        else:
-                            # Use solid color
-                            if isinstance(fbx_material, FbxSurfaceLambert):
-                                diffuse_color = fbx_material.Diffuse.Get()
-                                shader.CreateInput("diffuseColor", Sdf.ValueTypeNames.Color3f).Set(
-                                    Gf.Vec3f(diffuse_color[0], diffuse_color[1], diffuse_color[2])
-                                )
-
-                    # Get normal map
-                    normal_prop = fbx_material.FindProperty(FbxSurfaceMaterial.sNormalMap)
-                    if normal_prop.IsValid():
-                        texture_count = normal_prop.GetSrcObjectCount()
-                        if texture_count > 0:
-                            fbx_texture = normal_prop.GetSrcObject(0)
-                            if isinstance(fbx_texture, FbxFileTexture):
-                                texture_path = fbx_texture.GetFileName()
-                                texture_name = os.path.basename(texture_path)
-
-                                # Create normal texture reader
-                                normal_reader_path = f"{mat_path}/NormalTexture"
-                                normal_reader = UsdShade.Shader.Define(stage, normal_reader_path)
-                                normal_reader.CreateIdAttr("UsdUVTexture")
-                                normal_reader.CreateInput("file", Sdf.ValueTypeNames.Asset).Set(texture_name)
-                                normal_reader.CreateInput("st", Sdf.ValueTypeNames.Float2).ConnectToSource(st_output)
-                                # For normal maps, we need to specify it's a normal map
-                                normal_reader.CreateInput("sourceColorSpace", Sdf.ValueTypeNames.Token).Set("raw")
-
-                                # Connect to normal input
-                                normal_output = normal_reader.CreateOutput("rgb", Sdf.ValueTypeNames.Float3)
-                                shader.CreateInput("normal", Sdf.ValueTypeNames.Normal3f).ConnectToSource(normal_output)
-
-                    # Get bump/height map (alternative to normal map)
-                    bump_prop = fbx_material.FindProperty(FbxSurfaceMaterial.sBump)
-                    if bump_prop.IsValid() and not normal_prop.IsValid():
-                        texture_count = bump_prop.GetSrcObjectCount()
-                        if texture_count > 0:
-                            fbx_texture = bump_prop.GetSrcObject(0)
-                            if isinstance(fbx_texture, FbxFileTexture):
-                                texture_path = fbx_texture.GetFileName()
-                                texture_name = os.path.basename(texture_path)
-
-                                # Create bump texture reader
-                                bump_reader_path = f"{mat_path}/BumpTexture"
-                                bump_reader = UsdShade.Shader.Define(stage, bump_reader_path)
-                                bump_reader.CreateIdAttr("UsdUVTexture")
-                                bump_reader.CreateInput("file", Sdf.ValueTypeNames.Asset).Set(texture_name)
-                                bump_reader.CreateInput("st", Sdf.ValueTypeNames.Float2).ConnectToSource(st_output)
-                                bump_reader.CreateInput("sourceColorSpace", Sdf.ValueTypeNames.Token).Set("raw")
-
-                                # Connect to normal input (bump maps can be used as normal maps)
-                                bump_output = bump_reader.CreateOutput("rgb", Sdf.ValueTypeNames.Float3)
-                                shader.CreateInput("normal", Sdf.ValueTypeNames.Normal3f).ConnectToSource(bump_output)
-
-                    # Get roughness map or use shininess
-                    roughness_set = False
-                    roughness_prop = fbx_material.FindProperty("ShininessExponent")
-                    if not roughness_prop.IsValid():
-                        roughness_prop = fbx_material.FindProperty("Roughness")
-
-                    if roughness_prop.IsValid():
-                        texture_count = roughness_prop.GetSrcObjectCount()
-                        if texture_count > 0:
-                            fbx_texture = roughness_prop.GetSrcObject(0)
-                            if isinstance(fbx_texture, FbxFileTexture):
-                                texture_path = fbx_texture.GetFileName()
-                                texture_name = os.path.basename(texture_path)
-
-                                # Create roughness texture reader
-                                roughness_reader_path = f"{mat_path}/RoughnessTexture"
-                                roughness_reader = UsdShade.Shader.Define(stage, roughness_reader_path)
-                                roughness_reader.CreateIdAttr("UsdUVTexture")
-                                roughness_reader.CreateInput("file", Sdf.ValueTypeNames.Asset).Set(texture_name)
-                                roughness_reader.CreateInput("st", Sdf.ValueTypeNames.Float2).ConnectToSource(st_output)
-                                roughness_reader.CreateInput("sourceColorSpace", Sdf.ValueTypeNames.Token).Set("raw")
-
-                                # Use red channel for roughness
-                                roughness_output = roughness_reader.CreateOutput("r", Sdf.ValueTypeNames.Float)
-                                shader.CreateInput("roughness", Sdf.ValueTypeNames.Float).ConnectToSource(roughness_output)
-                                roughness_set = True
-
-                    # Try to use shininess from Phong material if roughness not set
-                    if not roughness_set and isinstance(fbx_material, FbxSurfacePhong):
-                        try:
-                            shininess = fbx_material.Shininess.Get()
-                            # Convert shininess (0-100) to roughness (0-1)
-                            # Higher shininess = lower roughness
-                            roughness = 1.0 - min(shininess / 100.0, 1.0)
-                            shader.CreateInput("roughness", Sdf.ValueTypeNames.Float).Set(max(0.0, min(1.0, roughness)))
-                            roughness_set = True
-                        except:
-                            pass
-
-                    # Default roughness if nothing else worked
-                    if not roughness_set:
-                        # Use 0.5 as a reasonable default for diffuse materials
-                        shader.CreateInput("roughness", Sdf.ValueTypeNames.Float).Set(0.5)
-
-                    # Get metallic map
-                    metallic_prop = fbx_material.FindProperty("Metallic")
-                    if metallic_prop.IsValid():
-                        texture_count = metallic_prop.GetSrcObjectCount()
-                        if texture_count > 0:
-                            fbx_texture = metallic_prop.GetSrcObject(0)
-                            if isinstance(fbx_texture, FbxFileTexture):
-                                texture_path = fbx_texture.GetFileName()
-                                texture_name = os.path.basename(texture_path)
-
-                                # Create metallic texture reader
-                                metallic_reader_path = f"{mat_path}/MetallicTexture"
-                                metallic_reader = UsdShade.Shader.Define(stage, metallic_reader_path)
-                                metallic_reader.CreateIdAttr("UsdUVTexture")
-                                metallic_reader.CreateInput("file", Sdf.ValueTypeNames.Asset).Set(texture_name)
-                                metallic_reader.CreateInput("st", Sdf.ValueTypeNames.Float2).ConnectToSource(st_output)
-                                metallic_reader.CreateInput("sourceColorSpace", Sdf.ValueTypeNames.Token).Set("raw")
-
-                                # Use red channel for metallic
-                                metallic_output = metallic_reader.CreateOutput("r", Sdf.ValueTypeNames.Float)
-                                shader.CreateInput("metallic", Sdf.ValueTypeNames.Float).ConnectToSource(metallic_output)
-                        else:
-                            # Default to 0
-                            shader.CreateInput("metallic", Sdf.ValueTypeNames.Float).Set(0.0)
+                    if use_materialx:
+                        # Use MaterialX shaders for Reality Composer Pro
+                        usd_material = create_materialx_material(stage, mat_path, fbx_material)
+                        UsdShade.MaterialBindingAPI(usd_mesh.GetPrim()).Bind(usd_material)
                     else:
-                        shader.CreateInput("metallic", Sdf.ValueTypeNames.Float).Set(0.0)
+                        # Use UsdPreviewSurface (default)
+                        usd_material = UsdShade.Material.Define(stage, mat_path)
 
-                    # Get emissive map
-                    emissive_prop = fbx_material.FindProperty(FbxSurfaceMaterial.sEmissive)
-                    if emissive_prop.IsValid():
-                        texture_count = emissive_prop.GetSrcObjectCount()
-                        if texture_count > 0:
-                            fbx_texture = emissive_prop.GetSrcObject(0)
-                            if isinstance(fbx_texture, FbxFileTexture):
-                                texture_path = fbx_texture.GetFileName()
-                                texture_name = os.path.basename(texture_path)
+                        # Create USD Preview Surface shader
+                        shader_path = f"{mat_path}/PreviewSurface"
+                        shader = UsdShade.Shader.Define(stage, shader_path)
+                        shader.CreateIdAttr("UsdPreviewSurface")
 
-                                # Create emissive texture reader
-                                emissive_reader_path = f"{mat_path}/EmissiveTexture"
-                                emissive_reader = UsdShade.Shader.Define(stage, emissive_reader_path)
-                                emissive_reader.CreateIdAttr("UsdUVTexture")
-                                emissive_reader.CreateInput("file", Sdf.ValueTypeNames.Asset).Set(texture_name)
-                                emissive_reader.CreateInput("st", Sdf.ValueTypeNames.Float2).ConnectToSource(st_output)
+                        # Create primvar reader for st coordinates (shared by all textures)
+                        primvar_reader_path = f"{mat_path}/PrimvarReader"
+                        primvar_reader = UsdShade.Shader.Define(stage, primvar_reader_path)
+                        primvar_reader.CreateIdAttr("UsdPrimvarReader_float2")
+                        primvar_reader.CreateInput("varname", Sdf.ValueTypeNames.String).Set("st")
+                        st_output = primvar_reader.CreateOutput("result", Sdf.ValueTypeNames.Float2)
 
-                                # Connect to emissive color
-                                emissive_output = emissive_reader.CreateOutput("rgb", Sdf.ValueTypeNames.Float3)
-                                shader.CreateInput("emissiveColor", Sdf.ValueTypeNames.Color3f).ConnectToSource(emissive_output)
+                        # Get diffuse color/texture
+                        diffuse_prop = fbx_material.FindProperty(FbxSurfaceMaterial.sDiffuse)
+                        if diffuse_prop.IsValid():
+                            # Check for texture
+                            texture_count = diffuse_prop.GetSrcObjectCount()
+                            if texture_count > 0:
+                                fbx_texture = diffuse_prop.GetSrcObject(0)
+                                if isinstance(fbx_texture, FbxFileTexture):
+                                    # Get texture file path
+                                    texture_path = fbx_texture.GetFileName()
+                                    texture_name = os.path.basename(texture_path)
 
-                    # Get occlusion/AO map
-                    ao_prop = fbx_material.FindProperty("AmbientOcclusion")
-                    if ao_prop.IsValid():
-                        texture_count = ao_prop.GetSrcObjectCount()
-                        if texture_count > 0:
-                            fbx_texture = ao_prop.GetSrcObject(0)
-                            if isinstance(fbx_texture, FbxFileTexture):
-                                texture_path = fbx_texture.GetFileName()
-                                texture_name = os.path.basename(texture_path)
+                                    # Create texture reader shader
+                                    tex_reader_path = f"{mat_path}/DiffuseTexture"
+                                    tex_reader = UsdShade.Shader.Define(stage, tex_reader_path)
+                                    tex_reader.CreateIdAttr("UsdUVTexture")
+                                    tex_reader.CreateInput("file", Sdf.ValueTypeNames.Asset).Set(texture_name)
+                                    tex_reader.CreateInput("st", Sdf.ValueTypeNames.Float2).ConnectToSource(st_output)
 
-                                # Create AO texture reader
-                                ao_reader_path = f"{mat_path}/OcclusionTexture"
-                                ao_reader = UsdShade.Shader.Define(stage, ao_reader_path)
-                                ao_reader.CreateIdAttr("UsdUVTexture")
-                                ao_reader.CreateInput("file", Sdf.ValueTypeNames.Asset).Set(texture_name)
-                                ao_reader.CreateInput("st", Sdf.ValueTypeNames.Float2).ConnectToSource(st_output)
-                                ao_reader.CreateInput("sourceColorSpace", Sdf.ValueTypeNames.Token).Set("raw")
+                                    # Connect texture to diffuse color
+                                    diffuse_output = tex_reader.CreateOutput("rgb", Sdf.ValueTypeNames.Float3)
+                                    shader.CreateInput("diffuseColor", Sdf.ValueTypeNames.Color3f).ConnectToSource(diffuse_output)
+                            else:
+                                # Use solid color
+                                if isinstance(fbx_material, FbxSurfaceLambert):
+                                    diffuse_color = fbx_material.Diffuse.Get()
+                                    shader.CreateInput("diffuseColor", Sdf.ValueTypeNames.Color3f).Set(
+                                        Gf.Vec3f(diffuse_color[0], diffuse_color[1], diffuse_color[2])
+                                    )
 
-                                # Connect to occlusion
-                                ao_output = ao_reader.CreateOutput("r", Sdf.ValueTypeNames.Float)
-                                shader.CreateInput("occlusion", Sdf.ValueTypeNames.Float).ConnectToSource(ao_output)
+                        # Get normal map
+                        normal_prop = fbx_material.FindProperty(FbxSurfaceMaterial.sNormalMap)
+                        if normal_prop.IsValid():
+                            texture_count = normal_prop.GetSrcObjectCount()
+                            if texture_count > 0:
+                                fbx_texture = normal_prop.GetSrcObject(0)
+                                if isinstance(fbx_texture, FbxFileTexture):
+                                    texture_path = fbx_texture.GetFileName()
+                                    texture_name = os.path.basename(texture_path)
 
-                    # Connect shader to material
-                    shader.CreateOutput("surface", Sdf.ValueTypeNames.Token)
-                    usd_material.CreateSurfaceOutput().ConnectToSource(shader.GetOutput("surface"))
+                                    # Create normal texture reader
+                                    normal_reader_path = f"{mat_path}/NormalTexture"
+                                    normal_reader = UsdShade.Shader.Define(stage, normal_reader_path)
+                                    normal_reader.CreateIdAttr("UsdUVTexture")
+                                    normal_reader.CreateInput("file", Sdf.ValueTypeNames.Asset).Set(texture_name)
+                                    normal_reader.CreateInput("st", Sdf.ValueTypeNames.Float2).ConnectToSource(st_output)
+                                    # For normal maps, we need to specify it's a normal map
+                                    normal_reader.CreateInput("sourceColorSpace", Sdf.ValueTypeNames.Token).Set("raw")
 
-                    # Bind material to mesh
-                    UsdShade.MaterialBindingAPI(usd_mesh.GetPrim()).Bind(usd_material)
+                                    # Connect to normal input
+                                    normal_output = normal_reader.CreateOutput("rgb", Sdf.ValueTypeNames.Float3)
+                                    shader.CreateInput("normal", Sdf.ValueTypeNames.Normal3f).ConnectToSource(normal_output)
+
+                        # Get bump/height map (alternative to normal map)
+                        bump_prop = fbx_material.FindProperty(FbxSurfaceMaterial.sBump)
+                        if bump_prop.IsValid() and not normal_prop.IsValid():
+                            texture_count = bump_prop.GetSrcObjectCount()
+                            if texture_count > 0:
+                                fbx_texture = bump_prop.GetSrcObject(0)
+                                if isinstance(fbx_texture, FbxFileTexture):
+                                    texture_path = fbx_texture.GetFileName()
+                                    texture_name = os.path.basename(texture_path)
+
+                                    # Create bump texture reader
+                                    bump_reader_path = f"{mat_path}/BumpTexture"
+                                    bump_reader = UsdShade.Shader.Define(stage, bump_reader_path)
+                                    bump_reader.CreateIdAttr("UsdUVTexture")
+                                    bump_reader.CreateInput("file", Sdf.ValueTypeNames.Asset).Set(texture_name)
+                                    bump_reader.CreateInput("st", Sdf.ValueTypeNames.Float2).ConnectToSource(st_output)
+                                    bump_reader.CreateInput("sourceColorSpace", Sdf.ValueTypeNames.Token).Set("raw")
+
+                                    # Connect to normal input (bump maps can be used as normal maps)
+                                    bump_output = bump_reader.CreateOutput("rgb", Sdf.ValueTypeNames.Float3)
+                                    shader.CreateInput("normal", Sdf.ValueTypeNames.Normal3f).ConnectToSource(bump_output)
+
+                        # Get roughness map or use shininess
+                        roughness_set = False
+                        roughness_prop = fbx_material.FindProperty("ShininessExponent")
+                        if not roughness_prop.IsValid():
+                            roughness_prop = fbx_material.FindProperty("Roughness")
+
+                        if roughness_prop.IsValid():
+                            texture_count = roughness_prop.GetSrcObjectCount()
+                            if texture_count > 0:
+                                fbx_texture = roughness_prop.GetSrcObject(0)
+                                if isinstance(fbx_texture, FbxFileTexture):
+                                    texture_path = fbx_texture.GetFileName()
+                                    texture_name = os.path.basename(texture_path)
+
+                                    # Create roughness texture reader
+                                    roughness_reader_path = f"{mat_path}/RoughnessTexture"
+                                    roughness_reader = UsdShade.Shader.Define(stage, roughness_reader_path)
+                                    roughness_reader.CreateIdAttr("UsdUVTexture")
+                                    roughness_reader.CreateInput("file", Sdf.ValueTypeNames.Asset).Set(texture_name)
+                                    roughness_reader.CreateInput("st", Sdf.ValueTypeNames.Float2).ConnectToSource(st_output)
+                                    roughness_reader.CreateInput("sourceColorSpace", Sdf.ValueTypeNames.Token).Set("raw")
+
+                                    # Use red channel for roughness
+                                    roughness_output = roughness_reader.CreateOutput("r", Sdf.ValueTypeNames.Float)
+                                    shader.CreateInput("roughness", Sdf.ValueTypeNames.Float).ConnectToSource(roughness_output)
+                                    roughness_set = True
+
+                        # Try to use shininess from Phong material if roughness not set
+                        if not roughness_set and isinstance(fbx_material, FbxSurfacePhong):
+                            try:
+                                shininess = fbx_material.Shininess.Get()
+                                # Convert shininess (0-100) to roughness (0-1)
+                                # Higher shininess = lower roughness
+                                roughness = 1.0 - min(shininess / 100.0, 1.0)
+                                shader.CreateInput("roughness", Sdf.ValueTypeNames.Float).Set(max(0.0, min(1.0, roughness)))
+                                roughness_set = True
+                            except:
+                                pass
+
+                        # Default roughness if nothing else worked
+                        if not roughness_set:
+                            # Use 0.5 as a reasonable default for diffuse materials
+                            shader.CreateInput("roughness", Sdf.ValueTypeNames.Float).Set(0.5)
+
+                        # Get metallic map
+                        metallic_prop = fbx_material.FindProperty("Metallic")
+                        if metallic_prop.IsValid():
+                            texture_count = metallic_prop.GetSrcObjectCount()
+                            if texture_count > 0:
+                                fbx_texture = metallic_prop.GetSrcObject(0)
+                                if isinstance(fbx_texture, FbxFileTexture):
+                                    texture_path = fbx_texture.GetFileName()
+                                    texture_name = os.path.basename(texture_path)
+
+                                    # Create metallic texture reader
+                                    metallic_reader_path = f"{mat_path}/MetallicTexture"
+                                    metallic_reader = UsdShade.Shader.Define(stage, metallic_reader_path)
+                                    metallic_reader.CreateIdAttr("UsdUVTexture")
+                                    metallic_reader.CreateInput("file", Sdf.ValueTypeNames.Asset).Set(texture_name)
+                                    metallic_reader.CreateInput("st", Sdf.ValueTypeNames.Float2).ConnectToSource(st_output)
+                                    metallic_reader.CreateInput("sourceColorSpace", Sdf.ValueTypeNames.Token).Set("raw")
+
+                                    # Use red channel for metallic
+                                    metallic_output = metallic_reader.CreateOutput("r", Sdf.ValueTypeNames.Float)
+                                    shader.CreateInput("metallic", Sdf.ValueTypeNames.Float).ConnectToSource(metallic_output)
+                            else:
+                                # Default to 0
+                                shader.CreateInput("metallic", Sdf.ValueTypeNames.Float).Set(0.0)
+                        else:
+                            shader.CreateInput("metallic", Sdf.ValueTypeNames.Float).Set(0.0)
+
+                        # Get emissive map
+                        emissive_prop = fbx_material.FindProperty(FbxSurfaceMaterial.sEmissive)
+                        if emissive_prop.IsValid():
+                            texture_count = emissive_prop.GetSrcObjectCount()
+                            if texture_count > 0:
+                                fbx_texture = emissive_prop.GetSrcObject(0)
+                                if isinstance(fbx_texture, FbxFileTexture):
+                                    texture_path = fbx_texture.GetFileName()
+                                    texture_name = os.path.basename(texture_path)
+
+                                    # Create emissive texture reader
+                                    emissive_reader_path = f"{mat_path}/EmissiveTexture"
+                                    emissive_reader = UsdShade.Shader.Define(stage, emissive_reader_path)
+                                    emissive_reader.CreateIdAttr("UsdUVTexture")
+                                    emissive_reader.CreateInput("file", Sdf.ValueTypeNames.Asset).Set(texture_name)
+                                    emissive_reader.CreateInput("st", Sdf.ValueTypeNames.Float2).ConnectToSource(st_output)
+
+                                    # Connect to emissive color
+                                    emissive_output = emissive_reader.CreateOutput("rgb", Sdf.ValueTypeNames.Float3)
+                                    shader.CreateInput("emissiveColor", Sdf.ValueTypeNames.Color3f).ConnectToSource(emissive_output)
+
+                        # Get occlusion/AO map
+                        ao_prop = fbx_material.FindProperty("AmbientOcclusion")
+                        if ao_prop.IsValid():
+                            texture_count = ao_prop.GetSrcObjectCount()
+                            if texture_count > 0:
+                                fbx_texture = ao_prop.GetSrcObject(0)
+                                if isinstance(fbx_texture, FbxFileTexture):
+                                    texture_path = fbx_texture.GetFileName()
+                                    texture_name = os.path.basename(texture_path)
+
+                                    # Create AO texture reader
+                                    ao_reader_path = f"{mat_path}/OcclusionTexture"
+                                    ao_reader = UsdShade.Shader.Define(stage, ao_reader_path)
+                                    ao_reader.CreateIdAttr("UsdUVTexture")
+                                    ao_reader.CreateInput("file", Sdf.ValueTypeNames.Asset).Set(texture_name)
+                                    ao_reader.CreateInput("st", Sdf.ValueTypeNames.Float2).ConnectToSource(st_output)
+                                    ao_reader.CreateInput("sourceColorSpace", Sdf.ValueTypeNames.Token).Set("raw")
+
+                                    # Connect to occlusion
+                                    ao_output = ao_reader.CreateOutput("r", Sdf.ValueTypeNames.Float)
+                                    shader.CreateInput("occlusion", Sdf.ValueTypeNames.Float).ConnectToSource(ao_output)
+
+                        # Connect shader to material
+                        shader.CreateOutput("surface", Sdf.ValueTypeNames.Token)
+                        usd_material.CreateSurfaceOutput().ConnectToSource(shader.GetOutput("surface"))
+
+                        # Bind material to mesh
+                        UsdShade.MaterialBindingAPI(usd_mesh.GetPrim()).Bind(usd_material)
 
             # Skinning
             skin = fbx_mesh.GetDeformer(0, FbxDeformer.EDeformerType.eSkin)
@@ -1524,6 +1714,196 @@ def export_materials_only(stage, materials_scope_path, model_name, scene, mesh_n
                 usd_material.CreateSurfaceOutput().ConnectToSource(shader.GetOutput("surface"))
 
 
+def export_materials_materialx(stage, materials_scope_path, model_name, scene, mesh_nodes):
+    """Export materials using MaterialX shaders for Reality Composer Pro"""
+    for mesh_node in mesh_nodes:
+        fbx_mesh = mesh_node.GetMesh()
+        material_elem = fbx_mesh.GetElementMaterial()
+        if material_elem and mesh_node.GetMaterialCount() > 0:
+            fbx_material = mesh_node.GetMaterial(0)
+            if fbx_material:
+                mat_name = make_valid_identifier(fbx_material.GetName())
+                mat_path = f"{materials_scope_path}/{mat_name}"
+
+                # Skip if already created
+                if stage.GetPrimAtPath(mat_path):
+                    continue
+
+                usd_material = UsdShade.Material.Define(stage, mat_path)
+
+                # Create PBR surface shader
+                pbr_path = f"{mat_path}/PBRSurface"
+                pbr_shader = UsdShade.Shader.Define(stage, pbr_path)
+                pbr_shader.CreateIdAttr("ND_realitykit_pbr_surfaceshader")
+
+                # Create outputs
+                pbr_output = pbr_shader.CreateOutput("out", Sdf.ValueTypeNames.Token)
+
+                # Connect material to PBR shader
+                mtlx_output = usd_material.CreateOutput("mtlx:surface", Sdf.ValueTypeNames.Token)
+                mtlx_output.ConnectToSource(pbr_output)
+
+                # Also create realitykit:vertex output (empty, but RCP expects it)
+                usd_material.CreateOutput("realitykit:vertex", Sdf.ValueTypeNames.Token)
+
+                # Diffuse/Base Color
+                diffuse_prop = fbx_material.FindProperty(FbxSurfaceMaterial.sDiffuse)
+                if diffuse_prop.IsValid():
+                    texture_count = diffuse_prop.GetSrcObjectCount()
+                    if texture_count > 0:
+                        fbx_texture = diffuse_prop.GetSrcObject(0)
+                        if isinstance(fbx_texture, FbxFileTexture):
+                            texture_path = fbx_texture.GetFileName()
+                            texture_name = os.path.basename(texture_path)
+
+                            tex_path = f"{mat_path}/DiffuseTexture"
+                            tex_shader = UsdShade.Shader.Define(stage, tex_path)
+                            tex_shader.CreateIdAttr("ND_RealityKitTexture2D_color3")
+                            tex_shader.CreateInput("file", Sdf.ValueTypeNames.Asset).Set(texture_name)
+                            tex_shader.CreateInput("no_flip_v", Sdf.ValueTypeNames.Bool).Set(True)
+                            tex_output = tex_shader.CreateOutput("out", Sdf.ValueTypeNames.Color3f)
+
+                            base_color_input = pbr_shader.CreateInput("baseColor", Sdf.ValueTypeNames.Color3f)
+                            base_color_input.ConnectToSource(tex_output)
+                    else:
+                        if isinstance(fbx_material, FbxSurfaceLambert):
+                            diffuse_color = fbx_material.Diffuse.Get()
+                            pbr_shader.CreateInput("baseColor", Sdf.ValueTypeNames.Color3f).Set(
+                                Gf.Vec3f(diffuse_color[0], diffuse_color[1], diffuse_color[2])
+                            )
+
+                # Normal map (requires decode node)
+                normal_prop = fbx_material.FindProperty(FbxSurfaceMaterial.sNormalMap)
+                if normal_prop.IsValid():
+                    texture_count = normal_prop.GetSrcObjectCount()
+                    if texture_count > 0:
+                        fbx_texture = normal_prop.GetSrcObject(0)
+                        if isinstance(fbx_texture, FbxFileTexture):
+                            texture_path = fbx_texture.GetFileName()
+                            texture_name = os.path.basename(texture_path)
+
+                            # Create normal texture node
+                            normal_tex_path = f"{mat_path}/NormalTexture"
+                            normal_tex = UsdShade.Shader.Define(stage, normal_tex_path)
+                            normal_tex.CreateIdAttr("ND_RealityKitTexture2D_color3")
+                            normal_tex.CreateInput("file", Sdf.ValueTypeNames.Asset).Set(texture_name)
+                            normal_tex.CreateInput("no_flip_v", Sdf.ValueTypeNames.Bool).Set(True)
+                            normal_tex_output = normal_tex.CreateOutput("out", Sdf.ValueTypeNames.Color3f)
+
+                            # Create normal map decode node
+                            decode_path = f"{mat_path}/NormalMapDecode"
+                            decode_shader = UsdShade.Shader.Define(stage, decode_path)
+                            decode_shader.CreateIdAttr("ND_normal_map_decode")
+                            decode_input = decode_shader.CreateInput("in", Sdf.ValueTypeNames.Float3)
+                            decode_input.ConnectToSource(normal_tex_output)
+                            decode_output = decode_shader.CreateOutput("out", Sdf.ValueTypeNames.Float3)
+
+                            # Connect to PBR shader
+                            normal_input = pbr_shader.CreateInput("normal", Sdf.ValueTypeNames.Float3)
+                            normal_input.ConnectToSource(decode_output)
+
+                # Roughness
+                roughness_set = False
+                roughness_prop = fbx_material.FindProperty("ShininessExponent")
+                if not roughness_prop.IsValid():
+                    roughness_prop = fbx_material.FindProperty("Roughness")
+
+                if roughness_prop.IsValid():
+                    texture_count = roughness_prop.GetSrcObjectCount()
+                    if texture_count > 0:
+                        fbx_texture = roughness_prop.GetSrcObject(0)
+                        if isinstance(fbx_texture, FbxFileTexture):
+                            texture_path = fbx_texture.GetFileName()
+                            texture_name = os.path.basename(texture_path)
+
+                            roughness_tex_path = f"{mat_path}/RoughnessTexture"
+                            roughness_tex = UsdShade.Shader.Define(stage, roughness_tex_path)
+                            roughness_tex.CreateIdAttr("ND_RealityKitTexture2D_float")
+                            roughness_tex.CreateInput("file", Sdf.ValueTypeNames.Asset).Set(texture_name)
+                            roughness_tex.CreateInput("no_flip_v", Sdf.ValueTypeNames.Bool).Set(True)
+                            roughness_tex_output = roughness_tex.CreateOutput("out", Sdf.ValueTypeNames.Float)
+
+                            roughness_input = pbr_shader.CreateInput("roughness", Sdf.ValueTypeNames.Float)
+                            roughness_input.ConnectToSource(roughness_tex_output)
+                            roughness_set = True
+
+                if not roughness_set and isinstance(fbx_material, FbxSurfacePhong):
+                    try:
+                        shininess = fbx_material.Shininess.Get()
+                        roughness = 1.0 - min(shininess / 100.0, 1.0)
+                        pbr_shader.CreateInput("roughness", Sdf.ValueTypeNames.Float).Set(max(0.0, min(1.0, roughness)))
+                        roughness_set = True
+                    except:
+                        pass
+
+                if not roughness_set:
+                    pbr_shader.CreateInput("roughness", Sdf.ValueTypeNames.Float).Set(0.5)
+
+                # Metallic
+                metallic_prop = fbx_material.FindProperty("Metallic")
+                if metallic_prop.IsValid():
+                    texture_count = metallic_prop.GetSrcObjectCount()
+                    if texture_count > 0:
+                        fbx_texture = metallic_prop.GetSrcObject(0)
+                        if isinstance(fbx_texture, FbxFileTexture):
+                            texture_path = fbx_texture.GetFileName()
+                            texture_name = os.path.basename(texture_path)
+
+                            metallic_tex_path = f"{mat_path}/MetallicTexture"
+                            metallic_tex = UsdShade.Shader.Define(stage, metallic_tex_path)
+                            metallic_tex.CreateIdAttr("ND_RealityKitTexture2D_float")
+                            metallic_tex.CreateInput("file", Sdf.ValueTypeNames.Asset).Set(texture_name)
+                            metallic_tex.CreateInput("no_flip_v", Sdf.ValueTypeNames.Bool).Set(True)
+                            metallic_tex_output = metallic_tex.CreateOutput("out", Sdf.ValueTypeNames.Float)
+
+                            metallic_input = pbr_shader.CreateInput("metallic", Sdf.ValueTypeNames.Float)
+                            metallic_input.ConnectToSource(metallic_tex_output)
+                    else:
+                        pbr_shader.CreateInput("metallic", Sdf.ValueTypeNames.Float).Set(0.0)
+                else:
+                    pbr_shader.CreateInput("metallic", Sdf.ValueTypeNames.Float).Set(0.0)
+
+                # Emissive
+                emissive_prop = fbx_material.FindProperty(FbxSurfaceMaterial.sEmissive)
+                if emissive_prop.IsValid():
+                    texture_count = emissive_prop.GetSrcObjectCount()
+                    if texture_count > 0:
+                        fbx_texture = emissive_prop.GetSrcObject(0)
+                        if isinstance(fbx_texture, FbxFileTexture):
+                            texture_path = fbx_texture.GetFileName()
+                            texture_name = os.path.basename(texture_path)
+
+                            emissive_tex_path = f"{mat_path}/EmissiveTexture"
+                            emissive_tex = UsdShade.Shader.Define(stage, emissive_tex_path)
+                            emissive_tex.CreateIdAttr("ND_RealityKitTexture2D_color3")
+                            emissive_tex.CreateInput("file", Sdf.ValueTypeNames.Asset).Set(texture_name)
+                            emissive_tex.CreateInput("no_flip_v", Sdf.ValueTypeNames.Bool).Set(True)
+                            emissive_tex_output = emissive_tex.CreateOutput("out", Sdf.ValueTypeNames.Color3f)
+
+                            emissive_input = pbr_shader.CreateInput("emissiveColor", Sdf.ValueTypeNames.Color3f)
+                            emissive_input.ConnectToSource(emissive_tex_output)
+
+                # Ambient Occlusion
+                ao_prop = fbx_material.FindProperty("AmbientOcclusion")
+                if ao_prop.IsValid():
+                    texture_count = ao_prop.GetSrcObjectCount()
+                    if texture_count > 0:
+                        fbx_texture = ao_prop.GetSrcObject(0)
+                        if isinstance(fbx_texture, FbxFileTexture):
+                            texture_path = fbx_texture.GetFileName()
+                            texture_name = os.path.basename(texture_path)
+
+                            ao_tex_path = f"{mat_path}/OcclusionTexture"
+                            ao_tex = UsdShade.Shader.Define(stage, ao_tex_path)
+                            ao_tex.CreateIdAttr("ND_RealityKitTexture2D_float")
+                            ao_tex.CreateInput("file", Sdf.ValueTypeNames.Asset).Set(texture_name)
+                            ao_tex.CreateInput("no_flip_v", Sdf.ValueTypeNames.Bool).Set(True)
+                            ao_tex_output = ao_tex.CreateOutput("out", Sdf.ValueTypeNames.Float)
+
+                            ao_input = pbr_shader.CreateInput("ambientOcclusion", Sdf.ValueTypeNames.Float)
+                            ao_input.ConnectToSource(ao_tex_output)
+
+
 def bind_materials_from_reference(stage, geom_path, materials_path, scene, mesh_nodes):
     """Bind materials to meshes when materials are referenced from another file"""
     for mesh_node in mesh_nodes:
@@ -1545,7 +1925,7 @@ def bind_materials_from_reference(stage, geom_path, materials_path, scene, mesh_
                         UsdShade.MaterialBindingAPI(mesh_prim).Bind(usd_material)
 
 
-def convert_fbx_to_usd_separate(fbx_path, usd_path):
+def convert_fbx_to_usd_separate(fbx_path, usd_path, use_materialx=False):
     """Export FBX as separate USD files: main model, per-animation files, and parent file"""
 
     # Parse output path
@@ -1630,7 +2010,10 @@ def convert_fbx_to_usd_separate(fbx_path, usd_path):
     materials_stage.SetDefaultPrim(materials_scope.GetPrim())
 
     # Export materials to this stage
-    export_materials_only(materials_stage, "/Materials", model_name, scene, mesh_nodes)
+    if use_materialx:
+        export_materials_materialx(materials_stage, "/Materials", model_name, scene, mesh_nodes)
+    else:
+        export_materials_only(materials_stage, "/Materials", model_name, scene, mesh_nodes)
 
     materials_stage.GetRootLayer().Save()
     print(f"✓ Saved materials: {materials_usd_path}")
@@ -1868,6 +2251,8 @@ Examples:
     parser.add_argument('output', help='Output USD file path')
     parser.add_argument('-s', '--separate-animations', action='store_true',
                         help='Export each animation as a separate USD file')
+    parser.add_argument('-m', '--materialx', action='store_true',
+                        help='Use MaterialX shaders instead of UsdPreviewSurface (for Reality Composer Pro)')
 
     args = parser.parse_args()
 
@@ -1877,9 +2262,9 @@ Examples:
 
     try:
         if args.separate_animations:
-            convert_fbx_to_usd_separate(args.input, args.output)
+            convert_fbx_to_usd_separate(args.input, args.output, use_materialx=args.materialx)
         else:
-            convert_fbx_to_usd(args.input, args.output)
+            convert_fbx_to_usd(args.input, args.output, use_materialx=args.materialx)
     except Exception as e:
         print(f"Error: {e}")
         import traceback
