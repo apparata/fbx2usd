@@ -5,7 +5,8 @@ A Python command-line tool for converting FBX files with skeletal animations to 
 ## Features
 
 - **Skeletal Animation Support**: Preserves complete skeletal hierarchies and bind poses
-- **Multiple Animation Takes**: Concatenates multiple animation takes into a single timeline
+- **Multiple Animation Takes**: Concatenates into single timeline, or exports as separate files
+- **Separate Animation Export**: Export each animation take as a separate USD file with RealityKit AnimationLibrary
 - **RealityKit Compatible**: Creates animation libraries with clip definitions
 - **PBR Materials**: Converts materials with support for:
   - Diffuse/Albedo textures
@@ -30,17 +31,19 @@ A Python command-line tool for converting FBX files with skeletal animations to 
 
 ### Installing Dependencies
 
-1. **Install USD library** (via pip):
+**Install USD library** (via pip):
    ```bash
    pip install usd-core
    ```
 
-2. **Install Autodesk FBX SDK** (manual installation required):
+**Install Autodesk FBX SDK** (manual installation required):
 
    The FBX SDK is not available via pip and must be downloaded from Autodesk:
 
    - Visit [Autodesk FBX SDK Download Page](https://www.autodesk.com/developer-network/platform-technologies/fbx-sdk-2020-2-1)
-   - Download the FBX Python SDK for your platform (Windows, macOS, or Linux)
+   - Download and install the FBX SDK (2020.3)
+   - Download the FBX Python Bindings
+   - Download the FBX Python SDK
    - Follow Autodesk's installation instructions for your operating system
    - Ensure the FBX Python bindings are in your Python path
 
@@ -76,11 +79,29 @@ fbx2usd input.fbx output.usdc
 
 ### Basic Usage
 
-Convert an FBX file to USD:
+Convert an FBX file to USD (concatenates all animations into single timeline):
 
 ```bash
 python3 fbx2usd input.fbx output.usdc
 ```
+
+### Separate Animation Export
+
+Export each animation take as a separate USD file using the `-s` or `--separate-animations` flag:
+
+```bash
+python3 fbx2usd -s character.fbx output/Character.usda
+```
+
+This creates:
+- `Character_materials.usda` - Materials and shaders
+- `Character.usda` - Model with skeleton and mesh
+- `Character-<animation>.usda` - Individual animation files (one per take)
+- `Character_parent.usda` - **Main entry point** with AnimationLibrary
+- `README.md` - Usage instructions and Swift code example
+- Texture files are automatically copied to the output directory
+
+**In Reality Composer Pro**, add `Character_parent.usda` to your project. All other files will be brought in automatically because they are referenced. `Character_parent.usda` is also the file you should drag into the scene.
 
 ### Output Formats
 
@@ -91,14 +112,19 @@ The tool automatically determines the output format based on the file extension:
 
 ```bash
 python3 fbx2usd model.fbx model.usda  # ASCII output
-python3 fbx2usd model.fbx model.usdc  # Compressed output
+python3 fbx2usd model.fbx model.usdc  # Binary output
 ```
 
 ### Examples
 
-Convert a character with animations:
+Convert a character with animations (single file):
 ```bash
 python3 fbx2usd character_with_anims.fbx character.usdc
+```
+
+Export separate animation files for RealityKit:
+```bash
+python3 fbx2usd -s character.fbx output/Character.usda
 ```
 
 Convert to ASCII format for inspection:
@@ -125,7 +151,8 @@ The converter performs the following operations:
    - Maps FBX material properties to PBR parameters
    - References texture files with proper paths
 5. **Animation Export**:
-   - Concatenates all animation takes into a single timeline
+   - Default mode: Concatenates all animation takes into a single timeline
+   - Separate mode (`-s`): Creates individual files per animation with RealityKit AnimationLibrary
    - Samples skeletal transformations at 30 FPS
    - Creates RealityKit animation library with clip definitions
 6. **USD Writing**:
