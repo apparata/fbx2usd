@@ -10,6 +10,7 @@ FBX to USD converter matching the exact structure of working BusinessMan.usda
 import sys
 import os
 import argparse
+import shutil
 from fbx import *
 from pxr import Usd, UsdGeom, UsdSkel, UsdShade, Sdf, Gf
 
@@ -26,6 +27,60 @@ def make_valid_identifier(name):
     if valid and valid[0].isdigit():
         valid = '_' + valid
     return valid if valid else "prim"
+
+
+def collect_texture_paths(mesh_nodes):
+    """Collect all texture file paths from materials in the mesh nodes"""
+    texture_paths = set()
+
+    for mesh_node in mesh_nodes:
+        fbx_mesh = mesh_node.GetMesh()
+        material_elem = fbx_mesh.GetElementMaterial()
+        if material_elem and mesh_node.GetMaterialCount() > 0:
+            fbx_material = mesh_node.GetMaterial(0)
+            if fbx_material:
+                # Check all texture properties
+                texture_props = [
+                    FbxSurfaceMaterial.sDiffuse,
+                    FbxSurfaceMaterial.sNormalMap,
+                    FbxSurfaceMaterial.sBump,
+                    "ShininessExponent",
+                    "Roughness",
+                    "Metallic",
+                ]
+
+                for prop_name in texture_props:
+                    prop = fbx_material.FindProperty(prop_name)
+                    if prop.IsValid():
+                        texture_count = prop.GetSrcObjectCount()
+                        if texture_count > 0:
+                            fbx_texture = prop.GetSrcObject(0)
+                            if isinstance(fbx_texture, FbxFileTexture):
+                                texture_path = fbx_texture.GetFileName()
+                                if texture_path and os.path.exists(texture_path):
+                                    texture_paths.add(texture_path)
+
+    return texture_paths
+
+
+def copy_textures_to_output(texture_paths, output_dir):
+    """Copy texture files to the output directory"""
+    copied = []
+    for texture_path in texture_paths:
+        texture_name = os.path.basename(texture_path)
+        dest_path = os.path.join(output_dir, texture_name)
+
+        # Don't copy if source and dest are the same
+        if os.path.abspath(texture_path) == os.path.abspath(dest_path):
+            continue
+
+        try:
+            shutil.copy2(texture_path, dest_path)
+            copied.append(texture_name)
+        except Exception as e:
+            print(f"Warning: Could not copy texture {texture_name}: {e}")
+
+    return copied
 
 
 def gf_matrix_from_fbx(m):
@@ -1719,9 +1774,74 @@ def convert_fbx_to_usd_separate(fbx_path, usd_path):
     parent_stage.GetRootLayer().Save()
     print(f"✓ Saved parent file: {parent_usd_path}")
 
+    # Copy textures to output directory
+    texture_paths = collect_texture_paths(mesh_nodes)
+    if texture_paths and output_dir:
+        copied_textures = copy_textures_to_output(texture_paths, output_dir)
+        if copied_textures:
+            print(f"✓ Copied {len(copied_textures)} texture(s)")
+
+    # Write README.md
+    if output_dir:
+        readme_path = os.path.join(output_dir, "README.md")
+        parent_filename = os.path.basename(parent_usd_path)
+        parent_name = os.path.splitext(parent_filename)[0]
+        first_anim = anim_files[0][0] if anim_files else "Idle"
+        readme_content = f"""# {model_name} USD Files
+
+This directory contains USD files exported from an FBX file with separate animations.
+
+## Usage in Reality Composer Pro
+
+**Add `{parent_filename}` to your Reality Composer Pro project.** All other files will be brought in automatically because they are referenced.
+
+## File Structure
+
+- `{parent_filename}` - **Main entry point** with AnimationLibrary referencing all animations
+- `{os.path.basename(main_usd_path)}` - Model with skeleton and mesh
+- `{os.path.basename(materials_usd_path)}` - Materials and shaders
+- `{base_name}-<animation>.usda` - Individual animation files
+
+## Animations
+
+The following animations are available in the AnimationLibrary:
+
+"""
+        for take_name, _ in anim_files:
+            readme_content += f"- {take_name}\n"
+
+        readme_content += f"""
+## Example Code
+
+```swift
+guard
+    let modelParent = scene.findEntity(named: "{parent_name}"),
+    let modelRoot = modelParent.findEntity(named: "{model_name}"),
+    let animationLibrary = modelRoot.components[AnimationLibraryComponent.self]
+else {{
+    return
+}}
+
+guard let animation = animationLibrary.animations["{first_anim}"] else {{
+    return
+}}
+
+modelRoot.playAnimation(
+    animation.repeat(),
+    transitionDuration: 0,
+    startsPaused: false
+)
+```
+"""
+
+        with open(readme_path, 'w') as f:
+            f.write(readme_content)
+        print(f"✓ Created README.md")
+
     manager.Destroy()
 
-    print(f"\nGenerated {len(anim_files) + 2} USD files:")
+    print(f"\nGenerated {len(anim_files) + 3} USD files:")
+    print(f"  - {materials_usd_path} (materials)")
     print(f"  - {main_usd_path} (main model)")
     for take_name, anim_filename in anim_files:
         print(f"  - {os.path.join(output_dir, anim_filename) if output_dir else anim_filename} ({take_name} animation)")
