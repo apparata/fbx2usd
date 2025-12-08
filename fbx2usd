@@ -9,6 +9,7 @@ FBX to USD converter matching the exact structure of working BusinessMan.usda
 
 import sys
 import os
+import argparse
 from fbx import *
 from pxr import Usd, UsdGeom, UsdSkel, UsdShade, Sdf, Gf
 
@@ -747,24 +748,1018 @@ def convert_fbx_to_usd(fbx_path, usd_path):
     manager.Destroy()
 
 
+def load_fbx_scene(fbx_path):
+    """Load and prepare an FBX scene, returns (manager, scene)"""
+    manager = FbxManager.Create()
+    io_settings = FbxIOSettings.Create(manager, IOSROOT)
+    manager.SetIOSettings(io_settings)
+
+    scene = FbxScene.Create(manager, "scene")
+    importer = FbxImporter.Create(manager, "")
+
+    if not importer.Initialize(fbx_path, -1, manager.GetIOSettings()):
+        raise Exception(f"Failed to load FBX: {importer.GetStatus().GetErrorString()}")
+
+    if not importer.Import(scene):
+        raise Exception("Failed to import FBX")
+
+    importer.Destroy()
+    FbxAxisSystem.OpenGL.ConvertScene(scene)
+
+    # Get FBX scene unit and calculate scale factor
+    scene_unit = scene.GetGlobalSettings().GetSystemUnit()
+    fbx_scale = scene_unit.GetScaleFactor()
+
+    # Apply unit conversion to scene
+    if fbx_scale != 1.0:
+        unit_converter = FbxSystemUnit(1.0)
+        unit_converter.ConvertScene(scene)
+
+    return manager, scene
+
+
+def find_skeleton_root_node(scene):
+    """Find the root skeleton node in the scene"""
+    def find_skeleton_root(node):
+        attr = node.GetNodeAttribute()
+        if isinstance(attr, FbxSkeleton):
+            parent = node.GetParent()
+            parent_attr = parent.GetNodeAttribute() if parent else None
+            if not isinstance(parent_attr, FbxSkeleton):
+                return node
+        for i in range(node.GetChildCount()):
+            result = find_skeleton_root(node.GetChild(i))
+            if result:
+                return result
+        return None
+
+    return find_skeleton_root(scene.GetRootNode())
+
+
+def collect_joints(skel_root_joint):
+    """Collect all joints and their paths from a skeleton root"""
+    joints = []
+    joint_paths = {}
+
+    def collect_joints_recursive(joint, path=""):
+        joints.append(joint)
+        name = make_valid_identifier(joint.GetName())
+        joint_path = path + name
+        joint_paths[id(joint)] = joint_path
+
+        for i in range(joint.GetChildCount()):
+            child = joint.GetChild(i)
+            if isinstance(child.GetNodeAttribute(), FbxSkeleton):
+                collect_joints_recursive(child, joint_path + "/")
+
+    collect_joints_recursive(skel_root_joint)
+    return joints, joint_paths
+
+
+def get_bind_transforms(scene, joints, rest_transforms):
+    """Extract bind transforms from skin clusters"""
+    def find_mesh_with_skin(node):
+        if isinstance(node.GetNodeAttribute(), FbxMesh):
+            mesh = node.GetMesh()
+            skin = mesh.GetDeformer(0, FbxDeformer.EDeformerType.eSkin)
+            if skin:
+                return skin
+        for i in range(node.GetChildCount()):
+            result = find_mesh_with_skin(node.GetChild(i))
+            if result:
+                return result
+        return None
+
+    skin = find_mesh_with_skin(scene.GetRootNode())
+
+    if skin:
+        bind_transforms = []
+        for joint in joints:
+            found = False
+            for c in range(skin.GetClusterCount()):
+                cluster = skin.GetCluster(c)
+                if id(cluster.GetLink()) == id(joint):
+                    transform_link = FbxAMatrix()
+                    cluster.GetTransformLinkMatrix(transform_link)
+                    bind_transforms.append(gf_matrix_from_fbx(transform_link))
+                    found = True
+                    break
+
+            if not found:
+                bind_transforms.append(rest_transforms[len(bind_transforms)].GetInverse())
+    else:
+        bind_transforms = [rest.GetInverse() for rest in rest_transforms]
+
+    return bind_transforms
+
+
+def find_mesh_nodes(scene):
+    """Find all mesh nodes in the scene"""
+    meshes = []
+
+    def find_meshes(node):
+        if isinstance(node.GetNodeAttribute(), FbxMesh):
+            meshes.append(node)
+        for i in range(node.GetChildCount()):
+            find_meshes(node.GetChild(i))
+
+    find_meshes(scene.GetRootNode())
+    return meshes
+
+
+def export_skeleton(stage, skel_path, joints, joint_paths, bind_transforms):
+    """Create skeleton prim with joints, rest and bind transforms"""
+    skel = UsdSkel.Skeleton.Define(stage, skel_path)
+
+    joint_names = [joint_paths[id(j)] for j in joints]
+    skel.CreateJointsAttr().Set(joint_names)
+
+    rest_transforms = []
+    for joint in joints:
+        local_mat = gf_matrix_from_fbx(joint.EvaluateLocalTransform())
+        rest_transforms.append(local_mat)
+
+    skel.CreateRestTransformsAttr().Set(rest_transforms)
+    skel.CreateBindTransformsAttr().Set(bind_transforms)
+
+    return skel, joint_names, rest_transforms
+
+
+def export_animation(stage, anim_path, skel_path, skel_root_path, scene, joints, joint_names, clip_info, fps):
+    """Export a single animation clip to the stage"""
+    anim = UsdSkel.Animation.Define(stage, anim_path)
+    anim.CreateJointsAttr().Set(joint_names)
+
+    translations_attr = anim.CreateTranslationsAttr()
+    rotations_attr = anim.CreateRotationsAttr()
+    scales_attr = anim.CreateScalesAttr()
+
+    anim_evaluator = scene.GetAnimationEvaluator()
+
+    scene.SetCurrentAnimationStack(clip_info['stack'])
+    time_span = clip_info['stack'].GetLocalTimeSpan()
+    start_time = time_span.GetStart().GetSecondDouble()
+
+    local_frames = clip_info['end_frame'] - clip_info['start_frame'] + 1
+
+    for local_frame in range(local_frames):
+        time = local_frame / fps + start_time
+        fbx_time = FbxTime()
+        fbx_time.SetSecondDouble(time)
+
+        trans_list = []
+        rot_list = []
+        scale_list = []
+
+        for joint in joints:
+            fbx_matrix = anim_evaluator.GetNodeLocalTransform(joint, fbx_time)
+
+            translation = fbx_matrix.GetT()
+            trans_list.append(Gf.Vec3f(translation[0], translation[1], translation[2]))
+
+            q = fbx_matrix.GetQ()
+            rot_list.append(Gf.Quatf(float(q[3]), float(q[0]), float(q[1]), float(q[2])))
+
+            scale = fbx_matrix.GetS()
+            scale_list.append(Gf.Vec3h(scale[0], scale[1], scale[2]))
+
+        # Write at global frame offset
+        global_frame = clip_info['start_frame'] + local_frame
+        translations_attr.Set(trans_list, Usd.TimeCode(global_frame))
+        rotations_attr.Set(rot_list, Usd.TimeCode(global_frame))
+        scales_attr.Set(scale_list, Usd.TimeCode(global_frame))
+
+    # Bind animation to Skeleton
+    skel_prim = stage.GetPrimAtPath(skel_path)
+    binding = UsdSkel.BindingAPI.Apply(skel_prim)
+    binding.CreateAnimationSourceRel().AddTarget(Sdf.Path(anim_path))
+
+    # Bind SkelRoot to Skeleton and Animation
+    skel_root_prim = stage.GetPrimAtPath(skel_root_path)
+    skel_root_binding = UsdSkel.BindingAPI.Apply(skel_root_prim)
+    skel_root_binding.CreateSkeletonRel().AddTarget(Sdf.Path(skel_path))
+    skel_root_binding.CreateAnimationSourceRel().AddTarget(Sdf.Path(anim_path))
+
+
+def export_meshes(stage, geom_path, skel_path, model_name, scene, mesh_nodes, joints, include_materials=True):
+    """Export all meshes to the stage. Set include_materials=False to skip materials."""
+    UsdGeom.Scope.Define(stage, geom_path)
+
+    for mesh_node in mesh_nodes:
+        fbx_mesh = mesh_node.GetMesh()
+        mesh_name = make_valid_identifier(mesh_node.GetName())
+        mesh_path = f"{geom_path}/{mesh_name}"
+        usd_mesh = UsdGeom.Mesh.Define(stage, mesh_path)
+
+        # Vertices
+        verts = []
+        for i in range(fbx_mesh.GetControlPointsCount()):
+            pt = fbx_mesh.GetControlPoints()[i]
+            verts.append(Gf.Vec3f(pt[0], pt[1], pt[2]))
+        usd_mesh.CreatePointsAttr().Set(verts)
+
+        # Faces
+        counts = []
+        indices = []
+        for p in range(fbx_mesh.GetPolygonCount()):
+            size = fbx_mesh.GetPolygonSize(p)
+            counts.append(size)
+            for v in range(size):
+                indices.append(fbx_mesh.GetPolygonVertex(p, v))
+
+        usd_mesh.CreateFaceVertexCountsAttr().Set(counts)
+        usd_mesh.CreateFaceVertexIndicesAttr().Set(indices)
+
+        # Normals
+        normal_elem = fbx_mesh.GetElementNormal()
+        if normal_elem:
+            normals = []
+            for p in range(fbx_mesh.GetPolygonCount()):
+                for v in range(fbx_mesh.GetPolygonSize(p)):
+                    idx = p * fbx_mesh.GetPolygonSize(p) + v
+                    if normal_elem.GetReferenceMode() == FbxLayerElement.EReferenceMode.eDirect:
+                        n = normal_elem.GetDirectArray().GetAt(idx)
+                    else:
+                        i = normal_elem.GetIndexArray().GetAt(idx)
+                        n = normal_elem.GetDirectArray().GetAt(i)
+                    normals.append(Gf.Vec3f(n[0], n[1], n[2]))
+
+            if normals:
+                usd_mesh.CreateNormalsAttr().Set(normals)
+                usd_mesh.SetNormalsInterpolation(UsdGeom.Tokens.faceVarying)
+
+        # UVs
+        uv_set_count = fbx_mesh.GetElementUVCount()
+        primvar_api = UsdGeom.PrimvarsAPI(usd_mesh.GetPrim())
+
+        for uv_index in range(uv_set_count):
+            uv_elem = fbx_mesh.GetElementUV(uv_index)
+            if uv_elem:
+                uvs = []
+                mapping_mode = uv_elem.GetMappingMode()
+                reference_mode = uv_elem.GetReferenceMode()
+
+                polygon_vertex_index = 0
+
+                for p in range(fbx_mesh.GetPolygonCount()):
+                    for v in range(fbx_mesh.GetPolygonSize(p)):
+                        uv_index_to_use = 0
+
+                        if mapping_mode == FbxLayerElement.EMappingMode.eByControlPoint:
+                            uv_index_to_use = fbx_mesh.GetPolygonVertex(p, v)
+                        elif mapping_mode == FbxLayerElement.EMappingMode.eByPolygonVertex:
+                            uv_index_to_use = polygon_vertex_index
+                        elif mapping_mode == FbxLayerElement.EMappingMode.eByPolygon:
+                            uv_index_to_use = p
+                        else:
+                            uv_index_to_use = polygon_vertex_index
+
+                        if reference_mode == FbxLayerElement.EReferenceMode.eDirect:
+                            uv = uv_elem.GetDirectArray().GetAt(uv_index_to_use)
+                        else:
+                            uv_ref_index = uv_elem.GetIndexArray().GetAt(uv_index_to_use)
+                            uv = uv_elem.GetDirectArray().GetAt(uv_ref_index)
+
+                        uvs.append(Gf.Vec2f(uv[0], uv[1]))
+                        polygon_vertex_index += 1
+
+                if uvs:
+                    uv_set_name = uv_elem.GetName()
+                    if uv_index == 0:
+                        primvar_name = "st"
+                    elif uv_set_name:
+                        primvar_name = f"st_{make_valid_identifier(uv_set_name)}"
+                    else:
+                        primvar_name = f"st{uv_index}"
+
+                    st_primvar = primvar_api.CreatePrimvar(primvar_name, Sdf.ValueTypeNames.TexCoord2fArray, UsdGeom.Tokens.faceVarying)
+                    st_primvar.Set(uvs)
+
+        # Materials
+        material_elem = fbx_mesh.GetElementMaterial()
+        if include_materials and material_elem and mesh_node.GetMaterialCount() > 0:
+            fbx_material = mesh_node.GetMaterial(0)
+            if fbx_material:
+                mat_name = make_valid_identifier(fbx_material.GetName())
+                mat_path = f"/{model_name}/Materials/{mat_name}"
+
+                materials_scope_path = f"/{model_name}/Materials"
+                if not stage.GetPrimAtPath(materials_scope_path):
+                    UsdGeom.Scope.Define(stage, materials_scope_path)
+
+                usd_material = UsdShade.Material.Define(stage, mat_path)
+
+                shader_path = f"{mat_path}/PreviewSurface"
+                shader = UsdShade.Shader.Define(stage, shader_path)
+                shader.CreateIdAttr("UsdPreviewSurface")
+
+                primvar_reader_path = f"{mat_path}/PrimvarReader"
+                primvar_reader = UsdShade.Shader.Define(stage, primvar_reader_path)
+                primvar_reader.CreateIdAttr("UsdPrimvarReader_float2")
+                primvar_reader.CreateInput("varname", Sdf.ValueTypeNames.String).Set("st")
+                st_output = primvar_reader.CreateOutput("result", Sdf.ValueTypeNames.Float2)
+
+                diffuse_prop = fbx_material.FindProperty(FbxSurfaceMaterial.sDiffuse)
+                if diffuse_prop.IsValid():
+                    texture_count = diffuse_prop.GetSrcObjectCount()
+                    if texture_count > 0:
+                        fbx_texture = diffuse_prop.GetSrcObject(0)
+                        if isinstance(fbx_texture, FbxFileTexture):
+                            texture_path = fbx_texture.GetFileName()
+                            texture_name = os.path.basename(texture_path)
+
+                            tex_reader_path = f"{mat_path}/DiffuseTexture"
+                            tex_reader = UsdShade.Shader.Define(stage, tex_reader_path)
+                            tex_reader.CreateIdAttr("UsdUVTexture")
+                            tex_reader.CreateInput("file", Sdf.ValueTypeNames.Asset).Set(texture_name)
+                            tex_reader.CreateInput("st", Sdf.ValueTypeNames.Float2).ConnectToSource(st_output)
+
+                            diffuse_output = tex_reader.CreateOutput("rgb", Sdf.ValueTypeNames.Float3)
+                            shader.CreateInput("diffuseColor", Sdf.ValueTypeNames.Color3f).ConnectToSource(diffuse_output)
+                    else:
+                        if isinstance(fbx_material, FbxSurfaceLambert):
+                            diffuse_color = fbx_material.Diffuse.Get()
+                            shader.CreateInput("diffuseColor", Sdf.ValueTypeNames.Color3f).Set(
+                                Gf.Vec3f(diffuse_color[0], diffuse_color[1], diffuse_color[2])
+                            )
+
+                # Normal map
+                normal_prop = fbx_material.FindProperty(FbxSurfaceMaterial.sNormalMap)
+                if normal_prop.IsValid():
+                    texture_count = normal_prop.GetSrcObjectCount()
+                    if texture_count > 0:
+                        fbx_texture = normal_prop.GetSrcObject(0)
+                        if isinstance(fbx_texture, FbxFileTexture):
+                            texture_path = fbx_texture.GetFileName()
+                            texture_name = os.path.basename(texture_path)
+
+                            normal_reader_path = f"{mat_path}/NormalTexture"
+                            normal_reader = UsdShade.Shader.Define(stage, normal_reader_path)
+                            normal_reader.CreateIdAttr("UsdUVTexture")
+                            normal_reader.CreateInput("file", Sdf.ValueTypeNames.Asset).Set(texture_name)
+                            normal_reader.CreateInput("st", Sdf.ValueTypeNames.Float2).ConnectToSource(st_output)
+                            normal_reader.CreateInput("sourceColorSpace", Sdf.ValueTypeNames.Token).Set("raw")
+
+                            normal_output = normal_reader.CreateOutput("rgb", Sdf.ValueTypeNames.Float3)
+                            shader.CreateInput("normal", Sdf.ValueTypeNames.Normal3f).ConnectToSource(normal_output)
+
+                # Bump map fallback
+                bump_prop = fbx_material.FindProperty(FbxSurfaceMaterial.sBump)
+                if bump_prop.IsValid() and not normal_prop.IsValid():
+                    texture_count = bump_prop.GetSrcObjectCount()
+                    if texture_count > 0:
+                        fbx_texture = bump_prop.GetSrcObject(0)
+                        if isinstance(fbx_texture, FbxFileTexture):
+                            texture_path = fbx_texture.GetFileName()
+                            texture_name = os.path.basename(texture_path)
+
+                            bump_reader_path = f"{mat_path}/BumpTexture"
+                            bump_reader = UsdShade.Shader.Define(stage, bump_reader_path)
+                            bump_reader.CreateIdAttr("UsdUVTexture")
+                            bump_reader.CreateInput("file", Sdf.ValueTypeNames.Asset).Set(texture_name)
+                            bump_reader.CreateInput("st", Sdf.ValueTypeNames.Float2).ConnectToSource(st_output)
+                            bump_reader.CreateInput("sourceColorSpace", Sdf.ValueTypeNames.Token).Set("raw")
+
+                            bump_output = bump_reader.CreateOutput("rgb", Sdf.ValueTypeNames.Float3)
+                            shader.CreateInput("normal", Sdf.ValueTypeNames.Normal3f).ConnectToSource(bump_output)
+
+                # Roughness
+                roughness_set = False
+                roughness_prop = fbx_material.FindProperty("ShininessExponent")
+                if not roughness_prop.IsValid():
+                    roughness_prop = fbx_material.FindProperty("Roughness")
+
+                if roughness_prop.IsValid():
+                    texture_count = roughness_prop.GetSrcObjectCount()
+                    if texture_count > 0:
+                        fbx_texture = roughness_prop.GetSrcObject(0)
+                        if isinstance(fbx_texture, FbxFileTexture):
+                            texture_path = fbx_texture.GetFileName()
+                            texture_name = os.path.basename(texture_path)
+
+                            roughness_reader_path = f"{mat_path}/RoughnessTexture"
+                            roughness_reader = UsdShade.Shader.Define(stage, roughness_reader_path)
+                            roughness_reader.CreateIdAttr("UsdUVTexture")
+                            roughness_reader.CreateInput("file", Sdf.ValueTypeNames.Asset).Set(texture_name)
+                            roughness_reader.CreateInput("st", Sdf.ValueTypeNames.Float2).ConnectToSource(st_output)
+                            roughness_reader.CreateInput("sourceColorSpace", Sdf.ValueTypeNames.Token).Set("raw")
+
+                            roughness_output = roughness_reader.CreateOutput("r", Sdf.ValueTypeNames.Float)
+                            shader.CreateInput("roughness", Sdf.ValueTypeNames.Float).ConnectToSource(roughness_output)
+                            roughness_set = True
+
+                if not roughness_set and isinstance(fbx_material, FbxSurfacePhong):
+                    try:
+                        shininess = fbx_material.Shininess.Get()
+                        roughness = 1.0 - min(shininess / 100.0, 1.0)
+                        shader.CreateInput("roughness", Sdf.ValueTypeNames.Float).Set(max(0.0, min(1.0, roughness)))
+                        roughness_set = True
+                    except:
+                        pass
+
+                if not roughness_set:
+                    shader.CreateInput("roughness", Sdf.ValueTypeNames.Float).Set(0.5)
+
+                # Metallic
+                metallic_prop = fbx_material.FindProperty("Metallic")
+                if metallic_prop.IsValid():
+                    texture_count = metallic_prop.GetSrcObjectCount()
+                    if texture_count > 0:
+                        fbx_texture = metallic_prop.GetSrcObject(0)
+                        if isinstance(fbx_texture, FbxFileTexture):
+                            texture_path = fbx_texture.GetFileName()
+                            texture_name = os.path.basename(texture_path)
+
+                            metallic_reader_path = f"{mat_path}/MetallicTexture"
+                            metallic_reader = UsdShade.Shader.Define(stage, metallic_reader_path)
+                            metallic_reader.CreateIdAttr("UsdUVTexture")
+                            metallic_reader.CreateInput("file", Sdf.ValueTypeNames.Asset).Set(texture_name)
+                            metallic_reader.CreateInput("st", Sdf.ValueTypeNames.Float2).ConnectToSource(st_output)
+                            metallic_reader.CreateInput("sourceColorSpace", Sdf.ValueTypeNames.Token).Set("raw")
+
+                            metallic_output = metallic_reader.CreateOutput("r", Sdf.ValueTypeNames.Float)
+                            shader.CreateInput("metallic", Sdf.ValueTypeNames.Float).ConnectToSource(metallic_output)
+                    else:
+                        shader.CreateInput("metallic", Sdf.ValueTypeNames.Float).Set(0.0)
+                else:
+                    shader.CreateInput("metallic", Sdf.ValueTypeNames.Float).Set(0.0)
+
+                # Emissive
+                emissive_prop = fbx_material.FindProperty(FbxSurfaceMaterial.sEmissive)
+                if emissive_prop.IsValid():
+                    texture_count = emissive_prop.GetSrcObjectCount()
+                    if texture_count > 0:
+                        fbx_texture = emissive_prop.GetSrcObject(0)
+                        if isinstance(fbx_texture, FbxFileTexture):
+                            texture_path = fbx_texture.GetFileName()
+                            texture_name = os.path.basename(texture_path)
+
+                            emissive_reader_path = f"{mat_path}/EmissiveTexture"
+                            emissive_reader = UsdShade.Shader.Define(stage, emissive_reader_path)
+                            emissive_reader.CreateIdAttr("UsdUVTexture")
+                            emissive_reader.CreateInput("file", Sdf.ValueTypeNames.Asset).Set(texture_name)
+                            emissive_reader.CreateInput("st", Sdf.ValueTypeNames.Float2).ConnectToSource(st_output)
+
+                            emissive_output = emissive_reader.CreateOutput("rgb", Sdf.ValueTypeNames.Float3)
+                            shader.CreateInput("emissiveColor", Sdf.ValueTypeNames.Color3f).ConnectToSource(emissive_output)
+
+                # Occlusion/AO
+                ao_prop = fbx_material.FindProperty("AmbientOcclusion")
+                if ao_prop.IsValid():
+                    texture_count = ao_prop.GetSrcObjectCount()
+                    if texture_count > 0:
+                        fbx_texture = ao_prop.GetSrcObject(0)
+                        if isinstance(fbx_texture, FbxFileTexture):
+                            texture_path = fbx_texture.GetFileName()
+                            texture_name = os.path.basename(texture_path)
+
+                            ao_reader_path = f"{mat_path}/OcclusionTexture"
+                            ao_reader = UsdShade.Shader.Define(stage, ao_reader_path)
+                            ao_reader.CreateIdAttr("UsdUVTexture")
+                            ao_reader.CreateInput("file", Sdf.ValueTypeNames.Asset).Set(texture_name)
+                            ao_reader.CreateInput("st", Sdf.ValueTypeNames.Float2).ConnectToSource(st_output)
+                            ao_reader.CreateInput("sourceColorSpace", Sdf.ValueTypeNames.Token).Set("raw")
+
+                            ao_output = ao_reader.CreateOutput("r", Sdf.ValueTypeNames.Float)
+                            shader.CreateInput("occlusion", Sdf.ValueTypeNames.Float).ConnectToSource(ao_output)
+
+                shader.CreateOutput("surface", Sdf.ValueTypeNames.Token)
+                usd_material.CreateSurfaceOutput().ConnectToSource(shader.GetOutput("surface"))
+
+                UsdShade.MaterialBindingAPI(usd_mesh.GetPrim()).Bind(usd_material)
+
+        # Skinning
+        skin = fbx_mesh.GetDeformer(0, FbxDeformer.EDeformerType.eSkin)
+        if skin:
+            num_verts = fbx_mesh.GetControlPointsCount()
+            vert_weights = [[] for _ in range(num_verts)]
+
+            for c in range(skin.GetClusterCount()):
+                cluster = skin.GetCluster(c)
+                link = cluster.GetLink()
+
+                joint_idx = -1
+                for j_idx, j in enumerate(joints):
+                    if id(j) == id(link):
+                        joint_idx = j_idx
+                        break
+
+                if joint_idx == -1:
+                    continue
+
+                indices_arr = cluster.GetControlPointIndices()
+                weights_arr = cluster.GetControlPointWeights()
+
+                for i in range(cluster.GetControlPointIndicesCount()):
+                    v_idx = indices_arr[i]
+                    weight = weights_arr[i]
+                    if v_idx < num_verts and weight > 0:
+                        vert_weights[v_idx].append((joint_idx, weight))
+
+            max_influences = 4
+            flat_indices = []
+            flat_weights = []
+
+            for weights_list in vert_weights:
+                weights_list.sort(key=lambda x: x[1], reverse=True)
+                weights_list = weights_list[:max_influences]
+
+                total = sum(w for _, w in weights_list)
+                if total > 0:
+                    weights_list = [(j, w/total) for j, w in weights_list]
+
+                while len(weights_list) < max_influences:
+                    weights_list.append((0, 0.0))
+
+                for j, w in weights_list:
+                    flat_indices.append(j)
+                    flat_weights.append(w)
+
+            binding_api = UsdSkel.BindingAPI.Apply(usd_mesh.GetPrim())
+            binding_api.CreateSkeletonRel().AddTarget(Sdf.Path(skel_path))
+            binding_api.CreateGeomBindTransformAttr().Set(Gf.Matrix4d(1.0))
+
+            indices_pv = UsdGeom.Primvar(usd_mesh.GetPrim().CreateAttribute(
+                "primvars:skel:jointIndices", Sdf.ValueTypeNames.IntArray, False
+            ))
+            indices_pv.SetInterpolation(UsdGeom.Tokens.vertex)
+            indices_pv.Set(flat_indices)
+            indices_pv.SetElementSize(max_influences)
+
+            weights_pv = UsdGeom.Primvar(usd_mesh.GetPrim().CreateAttribute(
+                "primvars:skel:jointWeights", Sdf.ValueTypeNames.FloatArray, False
+            ))
+            weights_pv.SetInterpolation(UsdGeom.Tokens.vertex)
+            weights_pv.Set(flat_weights)
+            weights_pv.SetElementSize(max_influences)
+
+
+def export_materials_only(stage, materials_scope_path, model_name, scene, mesh_nodes):
+    """Export only materials to a stage (for separate materials file)"""
+    for mesh_node in mesh_nodes:
+        fbx_mesh = mesh_node.GetMesh()
+        material_elem = fbx_mesh.GetElementMaterial()
+        if material_elem and mesh_node.GetMaterialCount() > 0:
+            fbx_material = mesh_node.GetMaterial(0)
+            if fbx_material:
+                mat_name = make_valid_identifier(fbx_material.GetName())
+                mat_path = f"{materials_scope_path}/{mat_name}"
+
+                # Skip if already created
+                if stage.GetPrimAtPath(mat_path):
+                    continue
+
+                usd_material = UsdShade.Material.Define(stage, mat_path)
+
+                shader_path = f"{mat_path}/PreviewSurface"
+                shader = UsdShade.Shader.Define(stage, shader_path)
+                shader.CreateIdAttr("UsdPreviewSurface")
+
+                primvar_reader_path = f"{mat_path}/PrimvarReader"
+                primvar_reader = UsdShade.Shader.Define(stage, primvar_reader_path)
+                primvar_reader.CreateIdAttr("UsdPrimvarReader_float2")
+                primvar_reader.CreateInput("varname", Sdf.ValueTypeNames.String).Set("st")
+                st_output = primvar_reader.CreateOutput("result", Sdf.ValueTypeNames.Float2)
+
+                diffuse_prop = fbx_material.FindProperty(FbxSurfaceMaterial.sDiffuse)
+                if diffuse_prop.IsValid():
+                    texture_count = diffuse_prop.GetSrcObjectCount()
+                    if texture_count > 0:
+                        fbx_texture = diffuse_prop.GetSrcObject(0)
+                        if isinstance(fbx_texture, FbxFileTexture):
+                            texture_path = fbx_texture.GetFileName()
+                            texture_name = os.path.basename(texture_path)
+
+                            tex_reader_path = f"{mat_path}/DiffuseTexture"
+                            tex_reader = UsdShade.Shader.Define(stage, tex_reader_path)
+                            tex_reader.CreateIdAttr("UsdUVTexture")
+                            tex_reader.CreateInput("file", Sdf.ValueTypeNames.Asset).Set(texture_name)
+                            tex_reader.CreateInput("st", Sdf.ValueTypeNames.Float2).ConnectToSource(st_output)
+
+                            diffuse_output = tex_reader.CreateOutput("rgb", Sdf.ValueTypeNames.Float3)
+                            shader.CreateInput("diffuseColor", Sdf.ValueTypeNames.Color3f).ConnectToSource(diffuse_output)
+                    else:
+                        if isinstance(fbx_material, FbxSurfaceLambert):
+                            diffuse_color = fbx_material.Diffuse.Get()
+                            shader.CreateInput("diffuseColor", Sdf.ValueTypeNames.Color3f).Set(
+                                Gf.Vec3f(diffuse_color[0], diffuse_color[1], diffuse_color[2])
+                            )
+
+                # Normal map
+                normal_prop = fbx_material.FindProperty(FbxSurfaceMaterial.sNormalMap)
+                if normal_prop.IsValid():
+                    texture_count = normal_prop.GetSrcObjectCount()
+                    if texture_count > 0:
+                        fbx_texture = normal_prop.GetSrcObject(0)
+                        if isinstance(fbx_texture, FbxFileTexture):
+                            texture_path = fbx_texture.GetFileName()
+                            texture_name = os.path.basename(texture_path)
+
+                            normal_reader_path = f"{mat_path}/NormalTexture"
+                            normal_reader = UsdShade.Shader.Define(stage, normal_reader_path)
+                            normal_reader.CreateIdAttr("UsdUVTexture")
+                            normal_reader.CreateInput("file", Sdf.ValueTypeNames.Asset).Set(texture_name)
+                            normal_reader.CreateInput("st", Sdf.ValueTypeNames.Float2).ConnectToSource(st_output)
+                            normal_reader.CreateInput("sourceColorSpace", Sdf.ValueTypeNames.Token).Set("raw")
+
+                            normal_output = normal_reader.CreateOutput("rgb", Sdf.ValueTypeNames.Float3)
+                            shader.CreateInput("normal", Sdf.ValueTypeNames.Normal3f).ConnectToSource(normal_output)
+
+                # Roughness
+                roughness_set = False
+                roughness_prop = fbx_material.FindProperty("ShininessExponent")
+                if not roughness_prop.IsValid():
+                    roughness_prop = fbx_material.FindProperty("Roughness")
+
+                if roughness_prop.IsValid():
+                    texture_count = roughness_prop.GetSrcObjectCount()
+                    if texture_count > 0:
+                        fbx_texture = roughness_prop.GetSrcObject(0)
+                        if isinstance(fbx_texture, FbxFileTexture):
+                            texture_path = fbx_texture.GetFileName()
+                            texture_name = os.path.basename(texture_path)
+
+                            roughness_reader_path = f"{mat_path}/RoughnessTexture"
+                            roughness_reader = UsdShade.Shader.Define(stage, roughness_reader_path)
+                            roughness_reader.CreateIdAttr("UsdUVTexture")
+                            roughness_reader.CreateInput("file", Sdf.ValueTypeNames.Asset).Set(texture_name)
+                            roughness_reader.CreateInput("st", Sdf.ValueTypeNames.Float2).ConnectToSource(st_output)
+                            roughness_reader.CreateInput("sourceColorSpace", Sdf.ValueTypeNames.Token).Set("raw")
+
+                            roughness_output = roughness_reader.CreateOutput("r", Sdf.ValueTypeNames.Float)
+                            shader.CreateInput("roughness", Sdf.ValueTypeNames.Float).ConnectToSource(roughness_output)
+                            roughness_set = True
+
+                if not roughness_set and isinstance(fbx_material, FbxSurfacePhong):
+                    try:
+                        shininess = fbx_material.Shininess.Get()
+                        roughness = 1.0 - min(shininess / 100.0, 1.0)
+                        shader.CreateInput("roughness", Sdf.ValueTypeNames.Float).Set(max(0.0, min(1.0, roughness)))
+                        roughness_set = True
+                    except:
+                        pass
+
+                if not roughness_set:
+                    shader.CreateInput("roughness", Sdf.ValueTypeNames.Float).Set(0.5)
+
+                # Metallic
+                metallic_prop = fbx_material.FindProperty("Metallic")
+                if metallic_prop.IsValid():
+                    texture_count = metallic_prop.GetSrcObjectCount()
+                    if texture_count > 0:
+                        fbx_texture = metallic_prop.GetSrcObject(0)
+                        if isinstance(fbx_texture, FbxFileTexture):
+                            texture_path = fbx_texture.GetFileName()
+                            texture_name = os.path.basename(texture_path)
+
+                            metallic_reader_path = f"{mat_path}/MetallicTexture"
+                            metallic_reader = UsdShade.Shader.Define(stage, metallic_reader_path)
+                            metallic_reader.CreateIdAttr("UsdUVTexture")
+                            metallic_reader.CreateInput("file", Sdf.ValueTypeNames.Asset).Set(texture_name)
+                            metallic_reader.CreateInput("st", Sdf.ValueTypeNames.Float2).ConnectToSource(st_output)
+                            metallic_reader.CreateInput("sourceColorSpace", Sdf.ValueTypeNames.Token).Set("raw")
+
+                            metallic_output = metallic_reader.CreateOutput("r", Sdf.ValueTypeNames.Float)
+                            shader.CreateInput("metallic", Sdf.ValueTypeNames.Float).ConnectToSource(metallic_output)
+                    else:
+                        shader.CreateInput("metallic", Sdf.ValueTypeNames.Float).Set(0.0)
+                else:
+                    shader.CreateInput("metallic", Sdf.ValueTypeNames.Float).Set(0.0)
+
+                # Emissive
+                emissive_prop = fbx_material.FindProperty(FbxSurfaceMaterial.sEmissive)
+                if emissive_prop.IsValid():
+                    texture_count = emissive_prop.GetSrcObjectCount()
+                    if texture_count > 0:
+                        fbx_texture = emissive_prop.GetSrcObject(0)
+                        if isinstance(fbx_texture, FbxFileTexture):
+                            texture_path = fbx_texture.GetFileName()
+                            texture_name = os.path.basename(texture_path)
+
+                            emissive_reader_path = f"{mat_path}/EmissiveTexture"
+                            emissive_reader = UsdShade.Shader.Define(stage, emissive_reader_path)
+                            emissive_reader.CreateIdAttr("UsdUVTexture")
+                            emissive_reader.CreateInput("file", Sdf.ValueTypeNames.Asset).Set(texture_name)
+                            emissive_reader.CreateInput("st", Sdf.ValueTypeNames.Float2).ConnectToSource(st_output)
+
+                            emissive_output = emissive_reader.CreateOutput("rgb", Sdf.ValueTypeNames.Float3)
+                            shader.CreateInput("emissiveColor", Sdf.ValueTypeNames.Color3f).ConnectToSource(emissive_output)
+
+                # Occlusion/AO
+                ao_prop = fbx_material.FindProperty("AmbientOcclusion")
+                if ao_prop.IsValid():
+                    texture_count = ao_prop.GetSrcObjectCount()
+                    if texture_count > 0:
+                        fbx_texture = ao_prop.GetSrcObject(0)
+                        if isinstance(fbx_texture, FbxFileTexture):
+                            texture_path = fbx_texture.GetFileName()
+                            texture_name = os.path.basename(texture_path)
+
+                            ao_reader_path = f"{mat_path}/OcclusionTexture"
+                            ao_reader = UsdShade.Shader.Define(stage, ao_reader_path)
+                            ao_reader.CreateIdAttr("UsdUVTexture")
+                            ao_reader.CreateInput("file", Sdf.ValueTypeNames.Asset).Set(texture_name)
+                            ao_reader.CreateInput("st", Sdf.ValueTypeNames.Float2).ConnectToSource(st_output)
+                            ao_reader.CreateInput("sourceColorSpace", Sdf.ValueTypeNames.Token).Set("raw")
+
+                            ao_output = ao_reader.CreateOutput("r", Sdf.ValueTypeNames.Float)
+                            shader.CreateInput("occlusion", Sdf.ValueTypeNames.Float).ConnectToSource(ao_output)
+
+                shader.CreateOutput("surface", Sdf.ValueTypeNames.Token)
+                usd_material.CreateSurfaceOutput().ConnectToSource(shader.GetOutput("surface"))
+
+
+def bind_materials_from_reference(stage, geom_path, materials_path, scene, mesh_nodes):
+    """Bind materials to meshes when materials are referenced from another file"""
+    for mesh_node in mesh_nodes:
+        fbx_mesh = mesh_node.GetMesh()
+        mesh_name = make_valid_identifier(mesh_node.GetName())
+        mesh_path = f"{geom_path}/{mesh_name}"
+
+        material_elem = fbx_mesh.GetElementMaterial()
+        if material_elem and mesh_node.GetMaterialCount() > 0:
+            fbx_material = mesh_node.GetMaterial(0)
+            if fbx_material:
+                mat_name = make_valid_identifier(fbx_material.GetName())
+                mat_path = f"{materials_path}/{mat_name}"
+
+                mesh_prim = stage.GetPrimAtPath(mesh_path)
+                if mesh_prim:
+                    usd_material = UsdShade.Material.Get(stage, mat_path)
+                    if usd_material:
+                        UsdShade.MaterialBindingAPI(mesh_prim).Bind(usd_material)
+
+
+def convert_fbx_to_usd_separate(fbx_path, usd_path):
+    """Export FBX as separate USD files: main model, per-animation files, and parent file"""
+
+    # Parse output path
+    output_dir = os.path.dirname(usd_path)
+    base_name = os.path.splitext(os.path.basename(usd_path))[0]
+    ext = os.path.splitext(usd_path)[1] or '.usda'
+
+    if output_dir and not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+
+    # Load FBX scene
+    manager, scene = load_fbx_scene(fbx_path)
+
+    # Get model name from FBX
+    model_name = make_valid_identifier(os.path.splitext(os.path.basename(fbx_path))[0])
+
+    # Get FPS
+    time_mode = FbxTime.GetGlobalTimeMode()
+    fps = FbxTime.GetFrameRate(time_mode)
+
+    # Get animation stacks
+    anim_stacks = []
+    count = scene.GetSrcObjectCount(FbxCriteria.ObjectType(FbxAnimStack.ClassId))
+    for i in range(count):
+        anim_stacks.append(scene.GetSrcObject(FbxCriteria.ObjectType(FbxAnimStack.ClassId), i))
+
+    print(f"Found {len(anim_stacks)} animation takes")
+    for stack in anim_stacks:
+        print(f"  - {stack.GetName()}")
+
+    # Find skeleton
+    skel_root_joint = find_skeleton_root_node(scene)
+    if not skel_root_joint:
+        print("No skeleton found")
+        manager.Destroy()
+        return
+
+    # Collect joints
+    joints, joint_paths = collect_joints(skel_root_joint)
+    print(f"Found {len(joints)} joints")
+
+    # Get rest transforms
+    rest_transforms = []
+    for joint in joints:
+        local_mat = gf_matrix_from_fbx(joint.EvaluateLocalTransform())
+        rest_transforms.append(local_mat)
+
+    # Get bind transforms
+    bind_transforms = get_bind_transforms(scene, joints, rest_transforms)
+
+    # Find meshes
+    mesh_nodes = find_mesh_nodes(scene)
+    print(f"Found {len(mesh_nodes)} mesh(es)")
+
+    # Calculate clip info for each animation
+    clips_info = []
+    for stack in anim_stacks:
+        scene.SetCurrentAnimationStack(stack)
+        time_span = stack.GetLocalTimeSpan()
+        start_time = time_span.GetStart().GetSecondDouble()
+        stop_time = time_span.GetStop().GetSecondDouble()
+        frames_count = int((stop_time - start_time) * fps + 0.5) + 1
+
+        clips_info.append({
+            'name': make_valid_identifier(stack.GetName()),
+            'original_name': stack.GetName(),
+            'start_frame': 0,
+            'end_frame': frames_count - 1,
+            'stack': stack
+        })
+
+    # --- 0. Export Materials to separate file ---
+    materials_usd_path = os.path.join(output_dir, f"{base_name}_materials{ext}") if output_dir else f"{base_name}_materials{ext}"
+    materials_file_basename = os.path.basename(materials_usd_path)
+
+    materials_stage = Usd.Stage.CreateNew(materials_usd_path)
+    UsdGeom.SetStageUpAxis(materials_stage, UsdGeom.Tokens.y)
+    UsdGeom.SetStageMetersPerUnit(materials_stage, 1.0)
+
+    # Create Materials scope as default prim
+    materials_scope = UsdGeom.Scope.Define(materials_stage, "/Materials")
+    materials_stage.SetDefaultPrim(materials_scope.GetPrim())
+
+    # Export materials to this stage
+    export_materials_only(materials_stage, "/Materials", model_name, scene, mesh_nodes)
+
+    materials_stage.GetRootLayer().Save()
+    print(f"✓ Saved materials: {materials_usd_path}")
+
+    # --- 1. Export Main Model (no animation) ---
+    main_usd_path = os.path.join(output_dir, f"{base_name}{ext}") if output_dir else f"{base_name}{ext}"
+
+    main_stage = Usd.Stage.CreateNew(main_usd_path)
+    UsdGeom.SetStageUpAxis(main_stage, UsdGeom.Tokens.y)
+    UsdGeom.SetStageMetersPerUnit(main_stage, 1.0)
+
+    # Create hierarchy
+    root_xform = UsdGeom.Xform.Define(main_stage, f"/{model_name}")
+    main_stage.SetDefaultPrim(root_xform.GetPrim())
+
+    skel_root_path = f"/{model_name}/Root"
+    UsdSkel.Root.Define(main_stage, skel_root_path)
+
+    skel_path = f"{skel_root_path}/Skeleton"
+    skel, joint_names, _ = export_skeleton(main_stage, skel_path, joints, joint_paths, bind_transforms)
+
+    # Export meshes (without materials - they're in separate file)
+    geom_path = f"{skel_root_path}/Geom"
+    export_meshes(main_stage, geom_path, skel_path, model_name, scene, mesh_nodes, joints, include_materials=False)
+
+    # Reference materials from separate file
+    main_materials_path = f"/{model_name}/Materials"
+    main_materials_prim = main_stage.DefinePrim(main_materials_path)
+    main_materials_prim.GetReferences().AddReference(f"./{materials_file_basename}", "/Materials")
+
+    # Bind materials to meshes
+    bind_materials_from_reference(main_stage, geom_path, main_materials_path, scene, mesh_nodes)
+
+    main_stage.GetRootLayer().Save()
+    print(f"✓ Saved main model: {main_usd_path}")
+
+    # --- 2. Export Each Animation Take ---
+    anim_files = []
+    for clip_info in clips_info:
+        take_name = clip_info['name']
+        anim_usd_path = os.path.join(output_dir, f"{base_name}-{take_name}{ext}") if output_dir else f"{base_name}-{take_name}{ext}"
+        anim_files.append((take_name, os.path.basename(anim_usd_path)))
+
+        anim_stage = Usd.Stage.CreateNew(anim_usd_path)
+        UsdGeom.SetStageUpAxis(anim_stage, UsdGeom.Tokens.y)
+        UsdGeom.SetStageMetersPerUnit(anim_stage, 1.0)
+
+        # Set time range for this animation
+        anim_stage.SetStartTimeCode(0)
+        anim_stage.SetEndTimeCode(clip_info['end_frame'])
+        anim_stage.SetTimeCodesPerSecond(fps)
+
+        # Create hierarchy
+        anim_root_xform = UsdGeom.Xform.Define(anim_stage, f"/{model_name}")
+        anim_stage.SetDefaultPrim(anim_root_xform.GetPrim())
+
+        anim_skel_root_path = f"/{model_name}/Root"
+        UsdSkel.Root.Define(anim_stage, anim_skel_root_path)
+
+        anim_skel_path = f"{anim_skel_root_path}/Skeleton"
+        anim_skel, anim_joint_names, _ = export_skeleton(anim_stage, anim_skel_path, joints, joint_paths, bind_transforms)
+
+        # Export animation
+        anim_prim_path = f"{anim_skel_path}/Animation"
+        export_animation(anim_stage, anim_prim_path, anim_skel_path, anim_skel_root_path, scene, joints, anim_joint_names, clip_info, fps)
+
+        # Reference mesh from main file and materials from materials file
+        main_file_basename = os.path.basename(main_usd_path)
+
+        # Reference Geom (mesh)
+        anim_geom_path = f"{anim_skel_root_path}/Geom"
+        geom_prim = anim_stage.DefinePrim(anim_geom_path)
+        geom_prim.GetReferences().AddReference(f"./{main_file_basename}", f"/{model_name}/Root/Geom")
+
+        # Reference Materials from materials file
+        anim_materials_path = f"/{model_name}/Materials"
+        materials_prim = anim_stage.DefinePrim(anim_materials_path)
+        materials_prim.GetReferences().AddReference(f"./{materials_file_basename}", "/Materials")
+
+        # Override material bindings on the referenced mesh to use local materials path
+        # This is needed because the main file's mesh binds to its own materials path,
+        # but we need to rebind to this file's materials path
+        for mesh_node in mesh_nodes:
+            fbx_mesh = mesh_node.GetMesh()
+            mesh_name = make_valid_identifier(mesh_node.GetName())
+            mesh_path = f"{anim_geom_path}/{mesh_name}"
+
+            material_elem = fbx_mesh.GetElementMaterial()
+            if material_elem and mesh_node.GetMaterialCount() > 0:
+                fbx_material = mesh_node.GetMaterial(0)
+                if fbx_material:
+                    mat_name = make_valid_identifier(fbx_material.GetName())
+                    mat_path = f"{anim_materials_path}/{mat_name}"
+
+                    mesh_prim = anim_stage.GetPrimAtPath(mesh_path)
+                    if mesh_prim:
+                        usd_material = UsdShade.Material.Get(anim_stage, mat_path)
+                        if usd_material:
+                            UsdShade.MaterialBindingAPI(mesh_prim).Bind(usd_material)
+
+        anim_stage.GetRootLayer().Save()
+        print(f"✓ Saved animation: {anim_usd_path}")
+
+    # --- 3. Export Parent File ---
+    parent_usd_path = os.path.join(output_dir, f"{base_name}_parent{ext}") if output_dir else f"{base_name}_parent{ext}"
+
+    parent_stage = Usd.Stage.CreateNew(parent_usd_path)
+    UsdGeom.SetStageUpAxis(parent_stage, UsdGeom.Tokens.y)
+    UsdGeom.SetStageMetersPerUnit(parent_stage, 1.0)
+
+    # Create Root Xform as default prim
+    parent_root = UsdGeom.Xform.Define(parent_stage, "/Root")
+    parent_stage.SetDefaultPrim(parent_root.GetPrim())
+
+    # Reference main model
+    main_file_basename = os.path.basename(main_usd_path)
+    model_prim_path = f"/Root/{model_name}"
+    model_prim = parent_stage.DefinePrim(model_prim_path)
+    model_prim.GetReferences().AddReference(f"./{main_file_basename}")
+
+    # Create AnimationLibrary
+    if anim_files:
+        anim_lib_path = f"{model_prim_path}/AnimationLibrary"
+        anim_lib_prim = parent_stage.DefinePrim(anim_lib_path, "RealityKitComponent")
+
+        info_id_attr = anim_lib_prim.CreateAttribute(
+            "info:id", Sdf.ValueTypeNames.Token, custom=True
+        )
+        info_id_attr.Set("RealityKit.AnimationLibrary")
+
+        for take_name, anim_filename in anim_files:
+            anim_file_prim_path = f"{anim_lib_path}/{take_name}"
+            anim_file_prim = parent_stage.DefinePrim(anim_file_prim_path, "RealityKitAnimationFile")
+
+            file_attr = anim_file_prim.CreateAttribute("file", Sdf.ValueTypeNames.Asset, custom=True)
+            file_attr.Set(f"./{anim_filename}")
+
+            name_attr = anim_file_prim.CreateAttribute("name", Sdf.ValueTypeNames.String, custom=True)
+            name_attr.Set(take_name)
+
+    parent_stage.GetRootLayer().Save()
+    print(f"✓ Saved parent file: {parent_usd_path}")
+
+    manager.Destroy()
+
+    print(f"\nGenerated {len(anim_files) + 2} USD files:")
+    print(f"  - {main_usd_path} (main model)")
+    for take_name, anim_filename in anim_files:
+        print(f"  - {os.path.join(output_dir, anim_filename) if output_dir else anim_filename} ({take_name} animation)")
+    print(f"  - {parent_usd_path} (parent with AnimationLibrary)")
+
+
 def main():
-    if len(sys.argv) < 3:
-        print("Usage: fbx2usd <input.fbx> <output.usd[a|c]>")
-        print("\nMatches the exact structure of working BusinessMan.usda:")
-        print("- Animation is CHILD of Skeleton")
-        print("- metersPerUnit = 0.01")
-        print("- Bind transforms != Rest transforms")
-        sys.exit(1)
+    parser = argparse.ArgumentParser(
+        description='Convert FBX files to USD format with RealityKit support.',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog='''
+Examples:
+  fbx2usd input.fbx output.usda
+      Convert FBX to single USD with concatenated animations
 
-    fbx_path = sys.argv[1]
-    usd_path = sys.argv[2]
+  fbx2usd -s input.fbx output/Character.usda
+      Export separate USD files for each animation take:
+        - Character.usda (model without animation)
+        - Character-<take>.usda (full model with each animation)
+        - Character_parent.usda (parent file with AnimationLibrary)
+'''
+    )
+    parser.add_argument('input', help='Input FBX file path')
+    parser.add_argument('output', help='Output USD file path')
+    parser.add_argument('-s', '--separate-animations', action='store_true',
+                        help='Export each animation as a separate USD file')
 
-    if not os.path.exists(fbx_path):
-        print(f"Error: File not found: {fbx_path}")
+    args = parser.parse_args()
+
+    if not os.path.exists(args.input):
+        print(f"Error: File not found: {args.input}")
         sys.exit(1)
 
     try:
-        convert_fbx_to_usd(fbx_path, usd_path)
+        if args.separate_animations:
+            convert_fbx_to_usd_separate(args.input, args.output)
+        else:
+            convert_fbx_to_usd(args.input, args.output)
     except Exception as e:
         print(f"Error: {e}")
         import traceback
