@@ -206,7 +206,126 @@ This project is licensed under the 0BSD License - see the [LICENSE](LICENSE) fil
 - **Pixar USD**: Apache 2.0 License
 - **Autodesk FBX SDK**: Proprietary license from Autodesk (users must agree to Autodesk's terms)
 
+---
+
+# usdinspect
+
+A Python command-line tool for inspecting USD files (usda/usdc/usdz) and displaying RealityKit animation libraries, skeletal animations, and scene hierarchy information.
+
+## Features
+
+- **Stage Information**: Displays format, FPS, time range, up axis, and meters per unit
+- **Prim Summary**: Counts meshes, materials, skeletons, and other prim types
+- **Prim Hierarchy**: ASCII tree visualization of the scene graph
+- **RealityKit Animation Libraries**: Lists animation names and source files
+- **Skeletal Animations**: Shows duration, frame count, FPS, joint count, and animation channels
+- **Reference Following**: Recursively inspects referenced USD files (enabled by default)
+- **Markdown Output**: Formatted output with aligned tables
+- **Marked 2 Integration**: Option to open output directly in Marked 2 for preview
+
+## Usage
+
+### Basic Usage
+
+Inspect a USD file:
+
+```bash
+python3 usdinspect model.usda
+```
+
+### Options
+
+```
+usdinspect <input_file> [options]
+
+Options:
+  --no-recursive    Don't follow USD references (default: follows references)
+  -v, --verbose     Show detailed information
+  -m, --marked      Copy output to pasteboard and open in Marked 2
+```
+
+### Examples
+
+Inspect a USD file with all referenced files:
+```bash
+python3 usdinspect Character_parent.usdc
+```
+
+Inspect only the specified file (don't follow references):
+```bash
+python3 usdinspect Character.usda --no-recursive
+```
+
+Open the output in Marked 2 for preview:
+```bash
+python3 usdinspect Character_parent.usdc -m
+```
+
+## Output Example
+
+```markdown
+# Character_parent.usdc
+
+## Stage Info
+
+| Property        | Value         |
+|-----------------|---------------|
+| Format          | usdc (Binary) |
+| FPS             | 24.0          |
+| Time Range      | (not set)     |
+| Up Axis         | Y             |
+| Meters Per Unit | 1.0           |
+
+## Prim Summary
+
+| Type        | Count |
+|-------------|-------|
+| Total prims | 26    |
+| Meshes      | 1     |
+| Materials   | 1     |
+| Skeletons   | 1     |
+
+## Prim Hierarchy
+
+Root (Xform)
+└── Character (Xform)
+    ├── Root (SkelRoot)
+    │   ├── Skeleton (Skeleton)
+    │   └── Geom (Scope)
+    │       └── Character (Mesh)
+    └── AnimationLibrary (RealityKitComponent)
+        ├── Idle (RealityKitAnimationFile)
+        └── Walk (RealityKitAnimationFile)
+
+## RealityKit Animation Library
+
+**Path:** `/Root/Character/AnimationLibrary`
+
+### Animations
+
+| Name | File                  |
+|------|-----------------------|
+| Idle | `Character-Idle.usdc` |
+| Walk | `Character-Walk.usdc` |
+
+## Skeletal Animations
+
+| Source                | Path                                 | Duration | Frames | FPS  | Joints | Channels                        |
+|-----------------------|--------------------------------------|----------|--------|------|--------|---------------------------------|
+| `Character-Idle.usdc` | `/Character/Root/Skeleton/Animation` | 1.77s    | 54     | 30.0 | 50     | translations, rotations, scales |
+| `Character-Walk.usdc` | `/Character/Root/Skeleton/Animation` | 1.03s    | 32     | 30.0 | 50     | translations, rotations, scales |
+```
+
+## Requirements
+
+- Python 3.10 or higher
+- Pixar USD library (`usd-core`)
+
+No FBX SDK required - this tool only reads USD files.
+
+---
+
 ## Acknowledgments
 
 - Built using Pixar's Universal Scene Description (USD)
-- Uses Autodesk's FBX SDK for FBX file parsing
+- fbx2usd uses Autodesk's FBX SDK for FBX file parsing

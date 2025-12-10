@@ -1,0 +1,543 @@
+#!/usr/bin/env python3
+"""
+usdinspect - USD file inspection tool for RealityKit animations
+
+Inspects USD files (usda/usdc) and lists RealityKit animation libraries,
+animations, and related statistics. Follows references recursively by default.
+"""
+
+import sys
+import os
+import argparse
+import subprocess
+import io
+from pxr import Usd, UsdGeom, UsdSkel, Sdf
+
+
+def get_stage_info(stage):
+    """Get general info about a USD stage"""
+    info = {}
+
+    # Get file format from root layer
+    root_layer = stage.GetRootLayer()
+    identifier = root_layer.identifier
+    if identifier.endswith('.usda'):
+        info['format'] = 'usda (ASCII)'
+    elif identifier.endswith('.usdc'):
+        info['format'] = 'usdc (Binary)'
+    elif identifier.endswith('.usdz'):
+        info['format'] = 'usdz (Package)'
+    else:
+        info['format'] = 'USD'
+
+    # Timing info
+    info['fps'] = stage.GetTimeCodesPerSecond()
+    info['start_time'] = stage.GetStartTimeCode()
+    info['end_time'] = stage.GetEndTimeCode()
+
+    if info['fps'] > 0 and info['end_time'] >= info['start_time']:
+        info['duration'] = (info['end_time'] - info['start_time']) / info['fps']
+    else:
+        info['duration'] = 0.0
+
+    # Stage metadata
+    info['up_axis'] = UsdGeom.GetStageUpAxis(stage)
+    info['meters_per_unit'] = UsdGeom.GetStageMetersPerUnit(stage)
+
+    return info
+
+
+def count_prims(stage):
+    """Count different types of prims in the stage"""
+    counts = {
+        'total': 0,
+        'meshes': 0,
+        'materials': 0,
+        'skeletons': 0,
+        'skel_roots': 0,
+        'animations': 0,
+        'xforms': 0,
+    }
+
+    for prim in stage.Traverse():
+        counts['total'] += 1
+        type_name = prim.GetTypeName()
+
+        if type_name == 'Mesh':
+            counts['meshes'] += 1
+        elif type_name == 'Material':
+            counts['materials'] += 1
+        elif type_name == 'Skeleton':
+            counts['skeletons'] += 1
+        elif type_name == 'SkelRoot':
+            counts['skel_roots'] += 1
+        elif type_name == 'SkelAnimation':
+            counts['animations'] += 1
+        elif type_name == 'Xform':
+            counts['xforms'] += 1
+
+    return counts
+
+
+def find_skel_animations(stage, source_file):
+    """Find all UsdSkel.Animation prims and gather their stats"""
+    animations = []
+
+    for prim in stage.Traverse():
+        if prim.GetTypeName() == 'SkelAnimation':
+            anim = UsdSkel.Animation(prim)
+            if not anim:
+                continue
+
+            anim_info = {
+                'path': str(prim.GetPath()),
+                'source_file': source_file,
+            }
+
+            # Get joints
+            joints_attr = anim.GetJointsAttr()
+            joints = joints_attr.Get() if joints_attr else None
+            anim_info['joint_count'] = len(joints) if joints else 0
+
+            # Check which channels exist
+            channels = []
+
+            trans_attr = anim.GetTranslationsAttr()
+            if trans_attr and trans_attr.HasValue():
+                channels.append('translations')
+
+            rot_attr = anim.GetRotationsAttr()
+            if rot_attr and rot_attr.HasValue():
+                channels.append('rotations')
+
+            scale_attr = anim.GetScalesAttr()
+            if scale_attr and scale_attr.HasValue():
+                channels.append('scales')
+
+            anim_info['channels'] = channels
+
+            # Get timing from stage
+            stage_info = get_stage_info(stage)
+            anim_info['fps'] = stage_info['fps']
+            anim_info['start_time'] = stage_info['start_time']
+            anim_info['end_time'] = stage_info['end_time']
+            anim_info['duration'] = stage_info['duration']
+
+            # Calculate frame count
+            if stage_info['fps'] > 0:
+                anim_info['frame_count'] = int(stage_info['end_time'] - stage_info['start_time']) + 1
+            else:
+                anim_info['frame_count'] = 0
+
+            animations.append(anim_info)
+
+    return animations
+
+
+def find_realitykit_animation_libraries(stage):
+    """Find RealityKit AnimationLibrary components"""
+    libraries = []
+
+    for prim in stage.Traverse():
+        # Check for RealityKitComponent with AnimationLibrary info:id
+        if prim.GetTypeName() == 'RealityKitComponent':
+            info_id_attr = prim.GetAttribute('info:id')
+            if info_id_attr and info_id_attr.Get() == 'RealityKit.AnimationLibrary':
+                lib_info = {
+                    'path': str(prim.GetPath()),
+                    'clips': [],
+                    'animation_files': [],
+                }
+
+                # Find clip definitions and animation files as children
+                for child in prim.GetChildren():
+                    child_type = child.GetTypeName()
+
+                    if child_type == 'RealityKitClipDefinition':
+                        # Get clip names and start times
+                        clip_names_attr = child.GetAttribute('clipNames')
+                        start_times_attr = child.GetAttribute('startTimes')
+
+                        clip_names = clip_names_attr.Get() if clip_names_attr else []
+                        start_times = start_times_attr.Get() if start_times_attr else []
+
+                        for i, name in enumerate(clip_names or []):
+                            start_time = start_times[i] if start_times and i < len(start_times) else 0.0
+                            lib_info['clips'].append({
+                                'name': name,
+                                'start_time': start_time,
+                            })
+
+                    elif child_type == 'RealityKitAnimationFile':
+                        file_attr = child.GetAttribute('file')
+                        name_attr = child.GetAttribute('name')
+                        if file_attr:
+                            file_path = file_attr.Get()
+                            anim_name = name_attr.Get() if name_attr else None
+                            if file_path:
+                                lib_info['animation_files'].append({
+                                    'file': str(file_path),
+                                    'name': anim_name,
+                                })
+
+                libraries.append(lib_info)
+
+    return libraries
+
+
+def get_all_references(stage, base_dir):
+    """Get all file references from the stage"""
+    references = set()
+
+    for prim in stage.Traverse():
+        # Use PrimCompositionQuery to get direct references
+        query = Usd.PrimCompositionQuery.GetDirectReferences(prim)
+        for arc in query.GetCompositionArcs():
+            # Get the target node and its layer stack
+            target_node = arc.GetTargetNode()
+            if target_node:
+                layer_stack = target_node.layerStack
+                if layer_stack:
+                    for layer in layer_stack.layers:
+                        layer_id = layer.identifier
+                        root_id = stage.GetRootLayer().identifier
+                        if layer_id and layer_id != root_id:
+                            ref_path = layer_id
+                            if not os.path.isabs(ref_path):
+                                ref_path = os.path.join(base_dir, ref_path)
+                            if os.path.exists(ref_path):
+                                references.add(os.path.normpath(ref_path))
+
+    # Also check sublayers
+    root_layer = stage.GetRootLayer()
+    for sublayer_path in root_layer.subLayerPaths:
+        if not os.path.isabs(sublayer_path):
+            sublayer_path = os.path.join(base_dir, sublayer_path)
+        if os.path.exists(sublayer_path):
+            references.add(os.path.normpath(sublayer_path))
+
+    # Check for RealityKitAnimationFile references
+    for lib in find_realitykit_animation_libraries(stage):
+        for anim_entry in lib['animation_files']:
+            # Handle asset paths (may have @@ or ./)
+            anim_file = str(anim_entry['file']).strip('@').lstrip('./')
+            if not os.path.isabs(anim_file):
+                anim_file = os.path.join(base_dir, anim_file)
+            if os.path.exists(anim_file):
+                references.add(os.path.normpath(anim_file))
+
+    return list(references)
+
+
+def inspect_file(filepath, recursive=True, visited=None):
+    """Inspect a USD file and optionally follow references"""
+    if visited is None:
+        visited = set()
+
+    filepath = os.path.normpath(os.path.abspath(filepath))
+
+    if filepath in visited:
+        return None
+    visited.add(filepath)
+
+    if not os.path.exists(filepath):
+        print(f"Error: File not found: {filepath}", file=sys.stderr)
+        return None
+
+    try:
+        stage = Usd.Stage.Open(filepath)
+    except Exception as e:
+        print(f"Error opening {filepath}: {e}", file=sys.stderr)
+        return None
+
+    base_dir = os.path.dirname(filepath)
+    filename = os.path.basename(filepath)
+
+    result = {
+        'filepath': filepath,
+        'filename': filename,
+        'stage_info': get_stage_info(stage),
+        'prim_counts': count_prims(stage),
+        'prim_tree': get_prim_tree(stage),
+        'animation_libraries': find_realitykit_animation_libraries(stage),
+        'skel_animations': find_skel_animations(stage, filename),
+        'references': [],
+        'referenced_results': [],
+    }
+
+    # Get references
+    refs = get_all_references(stage, base_dir)
+    result['references'] = [os.path.basename(r) for r in refs]
+
+    # Recursively inspect referenced files
+    if recursive:
+        for ref_path in refs:
+            ref_result = inspect_file(ref_path, recursive=True, visited=visited)
+            if ref_result:
+                result['referenced_results'].append(ref_result)
+
+    return result
+
+
+def collect_all_animations(result):
+    """Collect all animations from result and referenced results"""
+    animations = list(result['skel_animations'])
+
+    for ref_result in result.get('referenced_results', []):
+        animations.extend(collect_all_animations(ref_result))
+
+    return animations
+
+
+def collect_all_libraries(result):
+    """Collect all animation libraries from result and referenced results"""
+    libraries = list(result['animation_libraries'])
+
+    for ref_result in result.get('referenced_results', []):
+        libraries.extend(collect_all_libraries(ref_result))
+
+    return libraries
+
+
+def count_referenced_files(result):
+    """Count total number of files inspected"""
+    count = 1  # This file
+    for ref_result in result.get('referenced_results', []):
+        count += count_referenced_files(ref_result)
+    return count
+
+
+def get_prim_tree(stage):
+    """Get prim hierarchy as a nested structure"""
+    def build_tree(prim):
+        node = {
+            'name': prim.GetName(),
+            'type': prim.GetTypeName() or "",
+            'children': []
+        }
+        for child in prim.GetChildren():
+            node['children'].append(build_tree(child))
+        return node
+
+    root_prims = []
+    for prim in stage.GetPseudoRoot().GetChildren():
+        root_prims.append(build_tree(prim))
+    return root_prims
+
+
+def print_prim_tree(tree, prefix="", is_last=True, is_root=True):
+    """Print prim tree in ASCII art format"""
+    for i, node in enumerate(tree):
+        is_last_node = (i == len(tree) - 1)
+
+        if is_root:
+            connector = ""
+            child_prefix = ""
+        else:
+            connector = "└── " if is_last_node else "├── "
+            child_prefix = "    " if is_last_node else "│   "
+
+        # Format: name (Type) or just name if no type
+        type_str = f" ({node['type']})" if node['type'] else ""
+        print(f"{prefix}{connector}{node['name']}{type_str}")
+
+        if node['children']:
+            print_prim_tree(node['children'], prefix + child_prefix, is_last_node, is_root=False)
+
+
+def print_markdown_table(headers, rows):
+    """Print a markdown table with aligned columns"""
+    # Calculate max width for each column
+    col_widths = [len(h) for h in headers]
+    for row in rows:
+        for i, cell in enumerate(row):
+            col_widths[i] = max(col_widths[i], len(str(cell)))
+
+    # Print header
+    header_line = "| " + " | ".join(h.ljust(col_widths[i]) for i, h in enumerate(headers)) + " |"
+    separator = "|" + "|".join("-" * (w + 2) for w in col_widths) + "|"
+    print(header_line)
+    print(separator)
+
+    # Print rows
+    for row in rows:
+        row_line = "| " + " | ".join(str(cell).ljust(col_widths[i]) for i, cell in enumerate(row)) + " |"
+        print(row_line)
+
+
+def print_default_output(result, verbose=False):
+    """Print general overview of the USD file in Markdown format"""
+    info = result['stage_info']
+    counts = result['prim_counts']
+
+    print(f"# {result['filename']}")
+    print()
+
+    # Stage info
+    print("## Stage Info")
+    print()
+    stage_rows = [
+        ["Format", info['format']],
+        ["FPS", info['fps']],
+    ]
+    if info['duration'] > 0:
+        stage_rows.append(["Time Range", f"{info['start_time']} - {info['end_time']} ({info['duration']:.2f}s)"])
+    else:
+        stage_rows.append(["Time Range", "(not set)"])
+    stage_rows.append(["Up Axis", info['up_axis']])
+    stage_rows.append(["Meters Per Unit", info['meters_per_unit']])
+    print_markdown_table(["Property", "Value"], stage_rows)
+    print()
+
+    # Prim summary
+    print("## Prim Summary")
+    print()
+    prim_rows = [["Total prims", counts['total']]]
+    if counts['meshes'] > 0:
+        prim_rows.append(["Meshes", counts['meshes']])
+    if counts['materials'] > 0:
+        prim_rows.append(["Materials", counts['materials']])
+    if counts['skeletons'] > 0:
+        prim_rows.append(["Skeletons", counts['skeletons']])
+    if counts['skel_roots'] > 0:
+        prim_rows.append(["SkelRoots", counts['skel_roots']])
+    if counts['xforms'] > 0 and verbose:
+        prim_rows.append(["Xforms", counts['xforms']])
+    print_markdown_table(["Type", "Count"], prim_rows)
+    print()
+
+    # Prim tree (already includes composed prims from references)
+    print("## Prim Hierarchy")
+    print()
+    print("```")
+    print_prim_tree(result['prim_tree'])
+    print("```")
+    print()
+
+    # Referenced files
+    if result['references']:
+        print(f"## Referenced Files ({len(result['references'])})")
+        print()
+        for ref in result['references']:
+            print(f"- `{ref}`")
+        print()
+
+    # Animation libraries and details
+    all_libraries = collect_all_libraries(result)
+    all_animations = collect_all_animations(result)
+
+    if all_libraries:
+        for lib in all_libraries:
+            print("## RealityKit Animation Library")
+            print()
+            print(f"**Path:** `{lib['path']}`")
+            print()
+
+            if lib['clips']:
+                print("### Clip Definitions")
+                print()
+                clip_rows = []
+                for clip in lib['clips']:
+                    clip_rows.append([clip['name'], f"{clip['start_time']}s"])
+                print_markdown_table(["Name", "Start Time"], clip_rows)
+                print()
+
+            if lib['animation_files']:
+                print("### Animations")
+                print()
+                anim_rows = []
+                for anim_entry in lib['animation_files']:
+                    name = anim_entry.get('name') or "-"
+                    # Clean up asset path format (@./file@ -> file)
+                    file_path = str(anim_entry['file']).strip('@').lstrip('./')
+                    anim_rows.append([name, f"`{file_path}`"])
+                print_markdown_table(["Name", "File"], anim_rows)
+                print()
+
+    # Skeletal animations from all files
+    if all_animations:
+        print("## Skeletal Animations")
+        print()
+        skel_rows = []
+        for anim in all_animations:
+            duration = f"{anim['duration']:.2f}s" if anim['duration'] > 0 else "-"
+            frames = str(anim['frame_count']) if anim['frame_count'] > 0 else "-"
+            fps = str(anim['fps']) if anim['fps'] > 0 else "-"
+            joints = str(anim['joint_count']) if anim['joint_count'] > 0 else "-"
+            channels = ", ".join(anim['channels']) if anim['channels'] else "-"
+            skel_rows.append([
+                f"`{anim['source_file']}`",
+                f"`{anim['path']}`",
+                duration,
+                frames,
+                fps,
+                joints,
+                channels
+            ])
+        print_markdown_table(["Source", "Path", "Duration", "Frames", "FPS", "Joints", "Channels"], skel_rows)
+        print()
+
+    if not all_libraries and not all_animations:
+        print("*No animations found.*")
+
+
+def copy_to_pasteboard(text):
+    """Copy text to macOS pasteboard using pbcopy"""
+    process = subprocess.Popen(['pbcopy'], stdin=subprocess.PIPE)
+    process.communicate(text.encode('utf-8'))
+
+
+def open_in_marked():
+    """Open Marked 2 with pasteboard content"""
+    subprocess.run(['open', 'x-marked://paste'])
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description='Inspect USD files for RealityKit animations and statistics.',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog='''
+Examples:
+  usdinspect model.usda                  # Inspect USD file
+  usdinspect model.usda --no-recursive   # Don't follow references
+  usdinspect model.usda -m               # Open output in Marked 2
+'''
+    )
+    parser.add_argument('input', help='Input USD file path (.usda, .usdc, or .usdz)')
+    parser.add_argument('--no-recursive', action='store_true',
+                        help="Don't follow USD references (default: follows references)")
+    parser.add_argument('-v', '--verbose', action='store_true',
+                        help='Show detailed information')
+    parser.add_argument('-m', '--marked', action='store_true',
+                        help='Copy output to pasteboard and open in Marked 2')
+
+    args = parser.parse_args()
+
+    if not os.path.exists(args.input):
+        print(f"Error: File not found: {args.input}", file=sys.stderr)
+        sys.exit(1)
+
+    recursive = not args.no_recursive
+    result = inspect_file(args.input, recursive=recursive)
+
+    if result is None:
+        sys.exit(1)
+
+    if args.marked:
+        # Capture output to string
+        old_stdout = sys.stdout
+        sys.stdout = io.StringIO()
+        print_default_output(result, verbose=args.verbose)
+        output = sys.stdout.getvalue()
+        sys.stdout = old_stdout
+
+        # Copy to pasteboard and open Marked 2
+        copy_to_pasteboard(output)
+        open_in_marked()
+        print("Output copied to pasteboard and opened in Marked 2")
+    else:
+        print_default_output(result, verbose=args.verbose)
+
+
+if __name__ == '__main__':
+    main()
