@@ -1,13 +1,14 @@
 # fbx2usd
 
-A Python command-line tool for converting FBX files with skeletal animations to USD (Universal Scene Description) format, optimized for Apple's RealityKit framework.
+A Python command-line tool for converting FBX files to USD (Universal Scene Description) format, optimized for Apple's RealityKit framework. Supports both skeletal and non-skeletal models with animations.
 
 ## Features
 
 - **Skeletal Animation Support**: Preserves complete skeletal hierarchies and bind poses
+- **Non-Skeletal Animation Support**: Exports transform-based animations for models without skeletons
 - **Multiple Animation Takes**: Concatenates into single timeline, or exports as separate files
 - **Separate Animation Export**: Export each animation take as a separate USD file with RealityKit AnimationLibrary
-- **RealityKit Compatible**: Creates animation libraries with clip definitions
+- **RealityKit Compatible**: Creates animation libraries with clip definitions for both skeletal and non-skeletal models
 - **PBR Materials**: Converts materials with support for:
   - Diffuse/Albedo textures
   - Normal maps
@@ -17,7 +18,8 @@ A Python command-line tool for converting FBX files with skeletal animations to 
   - Ambient Occlusion maps
 - **MaterialX Support**: Optional MaterialX shader export for Reality Composer Pro ShaderGraph compatibility
 - **Mesh Export**: Exports geometry with normals and multiple UV sets
-- **Skinning Weights**: Preserves skinning data (up to 4 influences per vertex)
+- **Skinning Weights**: Preserves skinning data (up to 4 influences per vertex) for skeletal models
+- **Static Model Support**: Exports models without animations as simple static geometry
 - **Flexible Output**: Supports binary USDC and human-readable ascii USDA formats
 - **Unit Conversion**: Handles unit conversion (defaults to centimeters with metersPerUnit = 0.01)
 
@@ -96,13 +98,15 @@ python3 fbx2usd -s character.fbx output/Character.usda
 
 This creates:
 - `Character_materials.usda` - Materials and shaders
-- `Character.usda` - Model with skeleton and mesh
+- `Character.usda` - Model with skeleton/mesh (or just mesh for non-skeletal models)
 - `Character-<animation>.usda` - Individual animation files (one per take)
 - `Character_parent.usda` - **Main entry point** with AnimationLibrary
 - `README.md` - Usage instructions and Swift code example
 - Texture files are automatically copied to the output directory
 
 **In Reality Composer Pro**, add `Character_parent.usda` to your project. All other files will be brought in automatically because they are referenced. `Character_parent.usda` is also the file you should drag into the scene.
+
+The same output structure is used for both skeletal and non-skeletal models, making the workflow consistent regardless of animation type.
 
 ### Output Formats
 
@@ -155,30 +159,34 @@ The converter performs the following operations:
 
 1. **Scene Loading**:
    - Loads the FBX file using the Autodesk FBX SDK
-2. **Skeleton Export**:
+   - Converts to OpenGL coordinate system (Y-up)
+2. **Model Type Detection**:
+   - Automatically detects whether the model has a skeleton
+   - Routes to appropriate export path (skeletal or non-skeletal)
+3. **Skeleton Export** (for skeletal models):
    - Extracts skeletal hierarchy
    - Preserves bind transforms and rest poses
-   - Converts to OpenGL coordinate system
-3. **Mesh Export**:
+4. **Mesh Export**:
    - Exports geometry with proper vertex ordering
    - Includes normals and multiple UV sets
-   - Preserves skinning weights and joint influences
-4. **Material Conversion**:
+   - Preserves skinning weights and joint influences (skeletal models only)
+5. **Material Conversion**:
    - Creates USD Preview Surface materials (default) or MaterialX shaders (`-m` flag)
    - Maps FBX material properties to PBR parameters
    - References texture files with proper paths
-5. **Animation Export**:
+6. **Animation Export**:
    - Default mode: Concatenates all animation takes into a single timeline
    - Separate mode (`-s`): Creates individual files per animation with RealityKit AnimationLibrary
-   - Samples skeletal transformations at 30 FPS
+   - Skeletal models: Samples joint transformations
+   - Non-skeletal models: Samples mesh transform operations (translate, rotate, scale)
    - Creates RealityKit animation library with clip definitions
-6. **USD Writing**:
+7. **USD Writing**:
    - Outputs the complete scene in USD format
 
 ## Limitations
 
-- Supports skeletal animation only (no morph targets/blend shapes currently)
-- Limited to 4 bone influences per vertex
+- No morph targets/blend shapes support currently
+- Limited to 4 bone influences per vertex (skeletal models)
 - Assumes Y-up coordinate system
 - Material conversion is optimized for PBR workflows
 - Texture paths are preserved as-is (not embedded)
@@ -195,7 +203,19 @@ By default, the converter sets `metersPerUnit = 0.01` (centimeters). The FBX sce
 
 ### Animation Sampling
 
-Animations are sampled at 30 FPS by default. All animation takes in the FBX file are concatenated sequentially into a single timeline.
+Animations are sampled at the FBX file's frame rate (typically 30 FPS). All animation takes in the FBX file are concatenated sequentially into a single timeline, or exported as separate files with the `-s` flag.
+
+### Model Types
+
+The converter automatically detects and handles two types of models:
+
+- **Skeletal models**: Models with a skeleton hierarchy. Animations are exported as `UsdSkel.Animation` with joint transforms.
+- **Non-skeletal models**: Models without a skeleton. Animations are exported as time-sampled USD xform operations (`xformOp:translate`, `xformOp:orient`, `xformOp:scale`) on mesh transforms.
+
+Both model types support:
+- Multiple animation takes
+- Concatenated or separate animation export
+- RealityKit AnimationLibrary generation
 
 ## License
 
