@@ -93,8 +93,9 @@ def gf_matrix_from_fbx(m):
     )
 
 
-def create_materialx_material(stage, mat_path, fbx_material):
-    """Create a MaterialX material for a single FBX material"""
+def create_materialx_material(stage, mat_path, fbx_material, textures_subdir=None):
+    """Create a MaterialX material for a single FBX material.
+    If textures_subdir is provided, texture references will be prefixed with that subdirectory."""
     usd_material = UsdShade.Material.Define(stage, mat_path)
 
     # Create PBR surface shader
@@ -121,11 +122,12 @@ def create_materialx_material(stage, mat_path, fbx_material):
             if isinstance(fbx_texture, FbxFileTexture):
                 texture_path = fbx_texture.GetFileName()
                 texture_name = os.path.basename(texture_path)
+                texture_ref = f"{textures_subdir}/{texture_name}" if textures_subdir else texture_name
 
                 tex_path = f"{mat_path}/DiffuseTexture"
                 tex_shader = UsdShade.Shader.Define(stage, tex_path)
                 tex_shader.CreateIdAttr("ND_RealityKitTexture2D_color3")
-                tex_shader.CreateInput("file", Sdf.ValueTypeNames.Asset).Set(texture_name)
+                tex_shader.CreateInput("file", Sdf.ValueTypeNames.Asset).Set(texture_ref)
                 tex_shader.CreateInput("no_flip_v", Sdf.ValueTypeNames.Bool).Set(True)
                 tex_output = tex_shader.CreateOutput("out", Sdf.ValueTypeNames.Color3f)
 
@@ -147,12 +149,13 @@ def create_materialx_material(stage, mat_path, fbx_material):
             if isinstance(fbx_texture, FbxFileTexture):
                 texture_path = fbx_texture.GetFileName()
                 texture_name = os.path.basename(texture_path)
+                texture_ref = f"{textures_subdir}/{texture_name}" if textures_subdir else texture_name
 
                 # Create normal texture node
                 normal_tex_path = f"{mat_path}/NormalTexture"
                 normal_tex = UsdShade.Shader.Define(stage, normal_tex_path)
                 normal_tex.CreateIdAttr("ND_RealityKitTexture2D_color3")
-                normal_tex.CreateInput("file", Sdf.ValueTypeNames.Asset).Set(texture_name)
+                normal_tex.CreateInput("file", Sdf.ValueTypeNames.Asset).Set(texture_ref)
                 normal_tex.CreateInput("no_flip_v", Sdf.ValueTypeNames.Bool).Set(True)
                 normal_tex_output = normal_tex.CreateOutput("out", Sdf.ValueTypeNames.Color3f)
 
@@ -181,11 +184,12 @@ def create_materialx_material(stage, mat_path, fbx_material):
             if isinstance(fbx_texture, FbxFileTexture):
                 texture_path = fbx_texture.GetFileName()
                 texture_name = os.path.basename(texture_path)
+                texture_ref = f"{textures_subdir}/{texture_name}" if textures_subdir else texture_name
 
                 roughness_tex_path = f"{mat_path}/RoughnessTexture"
                 roughness_tex = UsdShade.Shader.Define(stage, roughness_tex_path)
                 roughness_tex.CreateIdAttr("ND_RealityKitTexture2D_float")
-                roughness_tex.CreateInput("file", Sdf.ValueTypeNames.Asset).Set(texture_name)
+                roughness_tex.CreateInput("file", Sdf.ValueTypeNames.Asset).Set(texture_ref)
                 roughness_tex.CreateInput("no_flip_v", Sdf.ValueTypeNames.Bool).Set(True)
                 roughness_tex_output = roughness_tex.CreateOutput("out", Sdf.ValueTypeNames.Float)
 
@@ -214,11 +218,12 @@ def create_materialx_material(stage, mat_path, fbx_material):
             if isinstance(fbx_texture, FbxFileTexture):
                 texture_path = fbx_texture.GetFileName()
                 texture_name = os.path.basename(texture_path)
+                texture_ref = f"{textures_subdir}/{texture_name}" if textures_subdir else texture_name
 
                 metallic_tex_path = f"{mat_path}/MetallicTexture"
                 metallic_tex = UsdShade.Shader.Define(stage, metallic_tex_path)
                 metallic_tex.CreateIdAttr("ND_RealityKitTexture2D_float")
-                metallic_tex.CreateInput("file", Sdf.ValueTypeNames.Asset).Set(texture_name)
+                metallic_tex.CreateInput("file", Sdf.ValueTypeNames.Asset).Set(texture_ref)
                 metallic_tex.CreateInput("no_flip_v", Sdf.ValueTypeNames.Bool).Set(True)
                 metallic_tex_output = metallic_tex.CreateOutput("out", Sdf.ValueTypeNames.Float)
 
@@ -238,11 +243,12 @@ def create_materialx_material(stage, mat_path, fbx_material):
             if isinstance(fbx_texture, FbxFileTexture):
                 texture_path = fbx_texture.GetFileName()
                 texture_name = os.path.basename(texture_path)
+                texture_ref = f"{textures_subdir}/{texture_name}" if textures_subdir else texture_name
 
                 emissive_tex_path = f"{mat_path}/EmissiveTexture"
                 emissive_tex = UsdShade.Shader.Define(stage, emissive_tex_path)
                 emissive_tex.CreateIdAttr("ND_RealityKitTexture2D_color3")
-                emissive_tex.CreateInput("file", Sdf.ValueTypeNames.Asset).Set(texture_name)
+                emissive_tex.CreateInput("file", Sdf.ValueTypeNames.Asset).Set(texture_ref)
                 emissive_tex.CreateInput("no_flip_v", Sdf.ValueTypeNames.Bool).Set(True)
                 emissive_tex_output = emissive_tex.CreateOutput("out", Sdf.ValueTypeNames.Color3f)
 
@@ -258,11 +264,12 @@ def create_materialx_material(stage, mat_path, fbx_material):
             if isinstance(fbx_texture, FbxFileTexture):
                 texture_path = fbx_texture.GetFileName()
                 texture_name = os.path.basename(texture_path)
+                texture_ref = f"{textures_subdir}/{texture_name}" if textures_subdir else texture_name
 
                 ao_tex_path = f"{mat_path}/OcclusionTexture"
                 ao_tex = UsdShade.Shader.Define(stage, ao_tex_path)
                 ao_tex.CreateIdAttr("ND_RealityKitTexture2D_float")
-                ao_tex.CreateInput("file", Sdf.ValueTypeNames.Asset).Set(texture_name)
+                ao_tex.CreateInput("file", Sdf.ValueTypeNames.Asset).Set(texture_ref)
                 ao_tex.CreateInput("no_flip_v", Sdf.ValueTypeNames.Bool).Set(True)
                 ao_tex_output = ao_tex.CreateOutput("out", Sdf.ValueTypeNames.Float)
 
@@ -272,8 +279,29 @@ def create_materialx_material(stage, mat_path, fbx_material):
     return usd_material
 
 
-def convert_fbx_to_usd(fbx_path, usd_path, use_materialx=False):
+def convert_fbx_to_usd(fbx_path, usd_path, use_materialx=False, use_directory_structure=False):
     """Main conversion function"""
+
+    # Parse output path for directory structure
+    base_name = os.path.splitext(os.path.basename(usd_path))[0]
+
+    if use_directory_structure:
+        # Create organized directory structure
+        parent_dir = os.path.dirname(usd_path) or '.'
+        output_dir = os.path.join(parent_dir, base_name)
+        textures_dir = os.path.join(output_dir, "Textures")
+        textures_subdir = "Textures"
+        os.makedirs(output_dir, exist_ok=True)
+        os.makedirs(textures_dir, exist_ok=True)
+        # Update usd_path to be inside the new directory
+        usd_path = os.path.join(output_dir, os.path.basename(usd_path))
+    else:
+        # Flat structure (original behavior)
+        output_dir = os.path.dirname(usd_path)
+        textures_dir = output_dir
+        textures_subdir = None
+        if output_dir and not os.path.exists(output_dir):
+            os.makedirs(output_dir)
 
     # Load FBX
     manager = FbxManager.Create()
@@ -382,7 +410,7 @@ def convert_fbx_to_usd(fbx_path, usd_path, use_materialx=False):
         # No skeleton found - delegate to non-skeletal code path
         print("No skeleton found - using non-skeletal export path")
         manager.Destroy()
-        return convert_fbx_to_usd_no_skeleton(fbx_path, usd_path, use_materialx)
+        return convert_fbx_to_usd_no_skeleton(fbx_path, usd_path, use_materialx, use_directory_structure)
 
     # Collect joints
     joints = []
@@ -671,7 +699,7 @@ def convert_fbx_to_usd(fbx_path, usd_path, use_materialx=False):
 
                     if use_materialx:
                         # Use MaterialX shaders for Reality Composer Pro
-                        usd_material = create_materialx_material(stage, mat_path, fbx_material)
+                        usd_material = create_materialx_material(stage, mat_path, fbx_material, textures_subdir=textures_subdir)
                         UsdShade.MaterialBindingAPI(usd_mesh.GetPrim()).Bind(usd_material)
                     else:
                         # Use UsdPreviewSurface (default)
@@ -700,12 +728,13 @@ def convert_fbx_to_usd(fbx_path, usd_path, use_materialx=False):
                                     # Get texture file path
                                     texture_path = fbx_texture.GetFileName()
                                     texture_name = os.path.basename(texture_path)
+                                    texture_ref = f"{textures_subdir}/{texture_name}" if textures_subdir else texture_name
 
                                     # Create texture reader shader
                                     tex_reader_path = f"{mat_path}/DiffuseTexture"
                                     tex_reader = UsdShade.Shader.Define(stage, tex_reader_path)
                                     tex_reader.CreateIdAttr("UsdUVTexture")
-                                    tex_reader.CreateInput("file", Sdf.ValueTypeNames.Asset).Set(texture_name)
+                                    tex_reader.CreateInput("file", Sdf.ValueTypeNames.Asset).Set(texture_ref)
                                     tex_reader.CreateInput("st", Sdf.ValueTypeNames.Float2).ConnectToSource(st_output)
 
                                     # Connect texture to diffuse color
@@ -728,12 +757,13 @@ def convert_fbx_to_usd(fbx_path, usd_path, use_materialx=False):
                                 if isinstance(fbx_texture, FbxFileTexture):
                                     texture_path = fbx_texture.GetFileName()
                                     texture_name = os.path.basename(texture_path)
+                                    texture_ref = f"{textures_subdir}/{texture_name}" if textures_subdir else texture_name
 
                                     # Create normal texture reader
                                     normal_reader_path = f"{mat_path}/NormalTexture"
                                     normal_reader = UsdShade.Shader.Define(stage, normal_reader_path)
                                     normal_reader.CreateIdAttr("UsdUVTexture")
-                                    normal_reader.CreateInput("file", Sdf.ValueTypeNames.Asset).Set(texture_name)
+                                    normal_reader.CreateInput("file", Sdf.ValueTypeNames.Asset).Set(texture_ref)
                                     normal_reader.CreateInput("st", Sdf.ValueTypeNames.Float2).ConnectToSource(st_output)
                                     # For normal maps, we need to specify it's a normal map
                                     normal_reader.CreateInput("sourceColorSpace", Sdf.ValueTypeNames.Token).Set("raw")
@@ -751,12 +781,13 @@ def convert_fbx_to_usd(fbx_path, usd_path, use_materialx=False):
                                 if isinstance(fbx_texture, FbxFileTexture):
                                     texture_path = fbx_texture.GetFileName()
                                     texture_name = os.path.basename(texture_path)
+                                    texture_ref = f"{textures_subdir}/{texture_name}" if textures_subdir else texture_name
 
                                     # Create bump texture reader
                                     bump_reader_path = f"{mat_path}/BumpTexture"
                                     bump_reader = UsdShade.Shader.Define(stage, bump_reader_path)
                                     bump_reader.CreateIdAttr("UsdUVTexture")
-                                    bump_reader.CreateInput("file", Sdf.ValueTypeNames.Asset).Set(texture_name)
+                                    bump_reader.CreateInput("file", Sdf.ValueTypeNames.Asset).Set(texture_ref)
                                     bump_reader.CreateInput("st", Sdf.ValueTypeNames.Float2).ConnectToSource(st_output)
                                     bump_reader.CreateInput("sourceColorSpace", Sdf.ValueTypeNames.Token).Set("raw")
 
@@ -777,12 +808,13 @@ def convert_fbx_to_usd(fbx_path, usd_path, use_materialx=False):
                                 if isinstance(fbx_texture, FbxFileTexture):
                                     texture_path = fbx_texture.GetFileName()
                                     texture_name = os.path.basename(texture_path)
+                                    texture_ref = f"{textures_subdir}/{texture_name}" if textures_subdir else texture_name
 
                                     # Create roughness texture reader
                                     roughness_reader_path = f"{mat_path}/RoughnessTexture"
                                     roughness_reader = UsdShade.Shader.Define(stage, roughness_reader_path)
                                     roughness_reader.CreateIdAttr("UsdUVTexture")
-                                    roughness_reader.CreateInput("file", Sdf.ValueTypeNames.Asset).Set(texture_name)
+                                    roughness_reader.CreateInput("file", Sdf.ValueTypeNames.Asset).Set(texture_ref)
                                     roughness_reader.CreateInput("st", Sdf.ValueTypeNames.Float2).ConnectToSource(st_output)
                                     roughness_reader.CreateInput("sourceColorSpace", Sdf.ValueTypeNames.Token).Set("raw")
 
@@ -817,12 +849,13 @@ def convert_fbx_to_usd(fbx_path, usd_path, use_materialx=False):
                                 if isinstance(fbx_texture, FbxFileTexture):
                                     texture_path = fbx_texture.GetFileName()
                                     texture_name = os.path.basename(texture_path)
+                                    texture_ref = f"{textures_subdir}/{texture_name}" if textures_subdir else texture_name
 
                                     # Create metallic texture reader
                                     metallic_reader_path = f"{mat_path}/MetallicTexture"
                                     metallic_reader = UsdShade.Shader.Define(stage, metallic_reader_path)
                                     metallic_reader.CreateIdAttr("UsdUVTexture")
-                                    metallic_reader.CreateInput("file", Sdf.ValueTypeNames.Asset).Set(texture_name)
+                                    metallic_reader.CreateInput("file", Sdf.ValueTypeNames.Asset).Set(texture_ref)
                                     metallic_reader.CreateInput("st", Sdf.ValueTypeNames.Float2).ConnectToSource(st_output)
                                     metallic_reader.CreateInput("sourceColorSpace", Sdf.ValueTypeNames.Token).Set("raw")
 
@@ -844,12 +877,13 @@ def convert_fbx_to_usd(fbx_path, usd_path, use_materialx=False):
                                 if isinstance(fbx_texture, FbxFileTexture):
                                     texture_path = fbx_texture.GetFileName()
                                     texture_name = os.path.basename(texture_path)
+                                    texture_ref = f"{textures_subdir}/{texture_name}" if textures_subdir else texture_name
 
                                     # Create emissive texture reader
                                     emissive_reader_path = f"{mat_path}/EmissiveTexture"
                                     emissive_reader = UsdShade.Shader.Define(stage, emissive_reader_path)
                                     emissive_reader.CreateIdAttr("UsdUVTexture")
-                                    emissive_reader.CreateInput("file", Sdf.ValueTypeNames.Asset).Set(texture_name)
+                                    emissive_reader.CreateInput("file", Sdf.ValueTypeNames.Asset).Set(texture_ref)
                                     emissive_reader.CreateInput("st", Sdf.ValueTypeNames.Float2).ConnectToSource(st_output)
 
                                     # Connect to emissive color
@@ -865,12 +899,13 @@ def convert_fbx_to_usd(fbx_path, usd_path, use_materialx=False):
                                 if isinstance(fbx_texture, FbxFileTexture):
                                     texture_path = fbx_texture.GetFileName()
                                     texture_name = os.path.basename(texture_path)
+                                    texture_ref = f"{textures_subdir}/{texture_name}" if textures_subdir else texture_name
 
                                     # Create AO texture reader
                                     ao_reader_path = f"{mat_path}/OcclusionTexture"
                                     ao_reader = UsdShade.Shader.Define(stage, ao_reader_path)
                                     ao_reader.CreateIdAttr("UsdUVTexture")
-                                    ao_reader.CreateInput("file", Sdf.ValueTypeNames.Asset).Set(texture_name)
+                                    ao_reader.CreateInput("file", Sdf.ValueTypeNames.Asset).Set(texture_ref)
                                     ao_reader.CreateInput("st", Sdf.ValueTypeNames.Float2).ConnectToSource(st_output)
                                     ao_reader.CreateInput("sourceColorSpace", Sdf.ValueTypeNames.Token).Set("raw")
 
@@ -995,15 +1030,44 @@ def convert_fbx_to_usd(fbx_path, usd_path, use_materialx=False):
     stage.GetRootLayer().Save()
     print(f"✓ Saved: {usd_path}")
 
+    # Copy textures to output directory
+    if textures_dir:
+        texture_paths = collect_texture_paths(meshes)
+        if texture_paths:
+            copied_textures = copy_textures_to_output(texture_paths, textures_dir)
+            if copied_textures:
+                print(f"✓ Copied {len(copied_textures)} texture(s)")
+
     manager.Destroy()
 
 
-def convert_fbx_to_usd_no_skeleton(fbx_path, usd_path, use_materialx=False):
+def convert_fbx_to_usd_no_skeleton(fbx_path, usd_path, use_materialx=False, use_directory_structure=False):
     """Convert FBX without skeleton to USD with concatenated animations.
 
     This is a separate code path for models without skeletons.
     Animations are exported as time-sampled transforms on mesh Xforms.
     """
+    # Parse output path for directory structure
+    base_name = os.path.splitext(os.path.basename(usd_path))[0]
+
+    if use_directory_structure:
+        # Create organized directory structure
+        parent_dir = os.path.dirname(usd_path) or '.'
+        output_dir = os.path.join(parent_dir, base_name)
+        textures_dir = os.path.join(output_dir, "Textures")
+        textures_subdir = "Textures"
+        os.makedirs(output_dir, exist_ok=True)
+        os.makedirs(textures_dir, exist_ok=True)
+        # Update usd_path to be inside the new directory
+        usd_path = os.path.join(output_dir, os.path.basename(usd_path))
+    else:
+        # Flat structure (original behavior)
+        output_dir = os.path.dirname(usd_path)
+        textures_dir = output_dir
+        textures_subdir = None
+        if output_dir and not os.path.exists(output_dir):
+            os.makedirs(output_dir)
+
     # Load FBX
     manager = FbxManager.Create()
     io_settings = FbxIOSettings.Create(manager, IOSROOT)
@@ -1095,7 +1159,7 @@ def convert_fbx_to_usd_no_skeleton(fbx_path, usd_path, use_materialx=False):
     if meshes:
         # Create Geom scope directly under model (no SkelRoot needed)
         geom_path = f"/{model_name}/Geom"
-        export_meshes_no_skeleton(stage, geom_path, model_name, scene, meshes, include_materials=True)
+        export_meshes_no_skeleton(stage, geom_path, model_name, scene, meshes, include_materials=True, textures_subdir=textures_subdir)
 
         # Export transform animations for each mesh
         if clips_info:
@@ -1148,6 +1212,14 @@ def convert_fbx_to_usd_no_skeleton(fbx_path, usd_path, use_materialx=False):
     # Save
     stage.GetRootLayer().Save()
     print(f"✓ Saved: {usd_path}")
+
+    # Copy textures to output directory
+    if textures_dir:
+        texture_paths = collect_texture_paths(meshes)
+        if texture_paths:
+            copied_textures = copy_textures_to_output(texture_paths, textures_dir)
+            if copied_textures:
+                print(f"✓ Copied {len(copied_textures)} texture(s)")
 
     manager.Destroy()
 
@@ -1474,11 +1546,12 @@ def export_meshes(stage, geom_path, skel_path, model_name, scene, mesh_nodes, jo
                         if isinstance(fbx_texture, FbxFileTexture):
                             texture_path = fbx_texture.GetFileName()
                             texture_name = os.path.basename(texture_path)
+                            texture_ref = f"{textures_subdir}/{texture_name}" if textures_subdir else texture_name
 
                             tex_reader_path = f"{mat_path}/DiffuseTexture"
                             tex_reader = UsdShade.Shader.Define(stage, tex_reader_path)
                             tex_reader.CreateIdAttr("UsdUVTexture")
-                            tex_reader.CreateInput("file", Sdf.ValueTypeNames.Asset).Set(texture_name)
+                            tex_reader.CreateInput("file", Sdf.ValueTypeNames.Asset).Set(texture_ref)
                             tex_reader.CreateInput("st", Sdf.ValueTypeNames.Float2).ConnectToSource(st_output)
 
                             diffuse_output = tex_reader.CreateOutput("rgb", Sdf.ValueTypeNames.Float3)
@@ -1499,11 +1572,12 @@ def export_meshes(stage, geom_path, skel_path, model_name, scene, mesh_nodes, jo
                         if isinstance(fbx_texture, FbxFileTexture):
                             texture_path = fbx_texture.GetFileName()
                             texture_name = os.path.basename(texture_path)
+                            texture_ref = f"{textures_subdir}/{texture_name}" if textures_subdir else texture_name
 
                             normal_reader_path = f"{mat_path}/NormalTexture"
                             normal_reader = UsdShade.Shader.Define(stage, normal_reader_path)
                             normal_reader.CreateIdAttr("UsdUVTexture")
-                            normal_reader.CreateInput("file", Sdf.ValueTypeNames.Asset).Set(texture_name)
+                            normal_reader.CreateInput("file", Sdf.ValueTypeNames.Asset).Set(texture_ref)
                             normal_reader.CreateInput("st", Sdf.ValueTypeNames.Float2).ConnectToSource(st_output)
                             normal_reader.CreateInput("sourceColorSpace", Sdf.ValueTypeNames.Token).Set("raw")
 
@@ -1519,11 +1593,12 @@ def export_meshes(stage, geom_path, skel_path, model_name, scene, mesh_nodes, jo
                         if isinstance(fbx_texture, FbxFileTexture):
                             texture_path = fbx_texture.GetFileName()
                             texture_name = os.path.basename(texture_path)
+                            texture_ref = f"{textures_subdir}/{texture_name}" if textures_subdir else texture_name
 
                             bump_reader_path = f"{mat_path}/BumpTexture"
                             bump_reader = UsdShade.Shader.Define(stage, bump_reader_path)
                             bump_reader.CreateIdAttr("UsdUVTexture")
-                            bump_reader.CreateInput("file", Sdf.ValueTypeNames.Asset).Set(texture_name)
+                            bump_reader.CreateInput("file", Sdf.ValueTypeNames.Asset).Set(texture_ref)
                             bump_reader.CreateInput("st", Sdf.ValueTypeNames.Float2).ConnectToSource(st_output)
                             bump_reader.CreateInput("sourceColorSpace", Sdf.ValueTypeNames.Token).Set("raw")
 
@@ -1543,11 +1618,12 @@ def export_meshes(stage, geom_path, skel_path, model_name, scene, mesh_nodes, jo
                         if isinstance(fbx_texture, FbxFileTexture):
                             texture_path = fbx_texture.GetFileName()
                             texture_name = os.path.basename(texture_path)
+                            texture_ref = f"{textures_subdir}/{texture_name}" if textures_subdir else texture_name
 
                             roughness_reader_path = f"{mat_path}/RoughnessTexture"
                             roughness_reader = UsdShade.Shader.Define(stage, roughness_reader_path)
                             roughness_reader.CreateIdAttr("UsdUVTexture")
-                            roughness_reader.CreateInput("file", Sdf.ValueTypeNames.Asset).Set(texture_name)
+                            roughness_reader.CreateInput("file", Sdf.ValueTypeNames.Asset).Set(texture_ref)
                             roughness_reader.CreateInput("st", Sdf.ValueTypeNames.Float2).ConnectToSource(st_output)
                             roughness_reader.CreateInput("sourceColorSpace", Sdf.ValueTypeNames.Token).Set("raw")
 
@@ -1576,11 +1652,12 @@ def export_meshes(stage, geom_path, skel_path, model_name, scene, mesh_nodes, jo
                         if isinstance(fbx_texture, FbxFileTexture):
                             texture_path = fbx_texture.GetFileName()
                             texture_name = os.path.basename(texture_path)
+                            texture_ref = f"{textures_subdir}/{texture_name}" if textures_subdir else texture_name
 
                             metallic_reader_path = f"{mat_path}/MetallicTexture"
                             metallic_reader = UsdShade.Shader.Define(stage, metallic_reader_path)
                             metallic_reader.CreateIdAttr("UsdUVTexture")
-                            metallic_reader.CreateInput("file", Sdf.ValueTypeNames.Asset).Set(texture_name)
+                            metallic_reader.CreateInput("file", Sdf.ValueTypeNames.Asset).Set(texture_ref)
                             metallic_reader.CreateInput("st", Sdf.ValueTypeNames.Float2).ConnectToSource(st_output)
                             metallic_reader.CreateInput("sourceColorSpace", Sdf.ValueTypeNames.Token).Set("raw")
 
@@ -1600,11 +1677,12 @@ def export_meshes(stage, geom_path, skel_path, model_name, scene, mesh_nodes, jo
                         if isinstance(fbx_texture, FbxFileTexture):
                             texture_path = fbx_texture.GetFileName()
                             texture_name = os.path.basename(texture_path)
+                            texture_ref = f"{textures_subdir}/{texture_name}" if textures_subdir else texture_name
 
                             emissive_reader_path = f"{mat_path}/EmissiveTexture"
                             emissive_reader = UsdShade.Shader.Define(stage, emissive_reader_path)
                             emissive_reader.CreateIdAttr("UsdUVTexture")
-                            emissive_reader.CreateInput("file", Sdf.ValueTypeNames.Asset).Set(texture_name)
+                            emissive_reader.CreateInput("file", Sdf.ValueTypeNames.Asset).Set(texture_ref)
                             emissive_reader.CreateInput("st", Sdf.ValueTypeNames.Float2).ConnectToSource(st_output)
 
                             emissive_output = emissive_reader.CreateOutput("rgb", Sdf.ValueTypeNames.Float3)
@@ -1619,11 +1697,12 @@ def export_meshes(stage, geom_path, skel_path, model_name, scene, mesh_nodes, jo
                         if isinstance(fbx_texture, FbxFileTexture):
                             texture_path = fbx_texture.GetFileName()
                             texture_name = os.path.basename(texture_path)
+                            texture_ref = f"{textures_subdir}/{texture_name}" if textures_subdir else texture_name
 
                             ao_reader_path = f"{mat_path}/OcclusionTexture"
                             ao_reader = UsdShade.Shader.Define(stage, ao_reader_path)
                             ao_reader.CreateIdAttr("UsdUVTexture")
-                            ao_reader.CreateInput("file", Sdf.ValueTypeNames.Asset).Set(texture_name)
+                            ao_reader.CreateInput("file", Sdf.ValueTypeNames.Asset).Set(texture_ref)
                             ao_reader.CreateInput("st", Sdf.ValueTypeNames.Float2).ConnectToSource(st_output)
                             ao_reader.CreateInput("sourceColorSpace", Sdf.ValueTypeNames.Token).Set("raw")
 
@@ -1701,10 +1780,11 @@ def export_meshes(stage, geom_path, skel_path, model_name, scene, mesh_nodes, jo
             weights_pv.SetElementSize(max_influences)
 
 
-def export_meshes_no_skeleton(stage, geom_path, model_name, scene, mesh_nodes, include_materials=True):
+def export_meshes_no_skeleton(stage, geom_path, model_name, scene, mesh_nodes, include_materials=True, textures_subdir=None):
     """Export all meshes to the stage without skeleton/skinning data.
 
     This is a separate code path for models without skeletons.
+    If textures_subdir is provided, texture references will be prefixed with that subdirectory.
     """
     UsdGeom.Scope.Define(stage, geom_path)
 
@@ -1833,11 +1913,12 @@ def export_meshes_no_skeleton(stage, geom_path, model_name, scene, mesh_nodes, i
                         if isinstance(fbx_texture, FbxFileTexture):
                             texture_path = fbx_texture.GetFileName()
                             texture_name = os.path.basename(texture_path)
+                            texture_ref = f"{textures_subdir}/{texture_name}" if textures_subdir else texture_name
 
                             tex_reader_path = f"{mat_path}/DiffuseTexture"
                             tex_reader = UsdShade.Shader.Define(stage, tex_reader_path)
                             tex_reader.CreateIdAttr("UsdUVTexture")
-                            tex_reader.CreateInput("file", Sdf.ValueTypeNames.Asset).Set(texture_name)
+                            tex_reader.CreateInput("file", Sdf.ValueTypeNames.Asset).Set(texture_ref)
                             tex_reader.CreateInput("st", Sdf.ValueTypeNames.Float2).ConnectToSource(st_output)
 
                             diffuse_output = tex_reader.CreateOutput("rgb", Sdf.ValueTypeNames.Float3)
@@ -1858,11 +1939,12 @@ def export_meshes_no_skeleton(stage, geom_path, model_name, scene, mesh_nodes, i
                         if isinstance(fbx_texture, FbxFileTexture):
                             texture_path = fbx_texture.GetFileName()
                             texture_name = os.path.basename(texture_path)
+                            texture_ref = f"{textures_subdir}/{texture_name}" if textures_subdir else texture_name
 
                             normal_reader_path = f"{mat_path}/NormalTexture"
                             normal_reader = UsdShade.Shader.Define(stage, normal_reader_path)
                             normal_reader.CreateIdAttr("UsdUVTexture")
-                            normal_reader.CreateInput("file", Sdf.ValueTypeNames.Asset).Set(texture_name)
+                            normal_reader.CreateInput("file", Sdf.ValueTypeNames.Asset).Set(texture_ref)
                             normal_reader.CreateInput("st", Sdf.ValueTypeNames.Float2).ConnectToSource(st_output)
                             normal_reader.CreateInput("sourceColorSpace", Sdf.ValueTypeNames.Token).Set("raw")
 
@@ -1878,11 +1960,12 @@ def export_meshes_no_skeleton(stage, geom_path, model_name, scene, mesh_nodes, i
                         if isinstance(fbx_texture, FbxFileTexture):
                             texture_path = fbx_texture.GetFileName()
                             texture_name = os.path.basename(texture_path)
+                            texture_ref = f"{textures_subdir}/{texture_name}" if textures_subdir else texture_name
 
                             bump_reader_path = f"{mat_path}/BumpTexture"
                             bump_reader = UsdShade.Shader.Define(stage, bump_reader_path)
                             bump_reader.CreateIdAttr("UsdUVTexture")
-                            bump_reader.CreateInput("file", Sdf.ValueTypeNames.Asset).Set(texture_name)
+                            bump_reader.CreateInput("file", Sdf.ValueTypeNames.Asset).Set(texture_ref)
                             bump_reader.CreateInput("st", Sdf.ValueTypeNames.Float2).ConnectToSource(st_output)
                             bump_reader.CreateInput("sourceColorSpace", Sdf.ValueTypeNames.Token).Set("raw")
 
@@ -1902,11 +1985,12 @@ def export_meshes_no_skeleton(stage, geom_path, model_name, scene, mesh_nodes, i
                         if isinstance(fbx_texture, FbxFileTexture):
                             texture_path = fbx_texture.GetFileName()
                             texture_name = os.path.basename(texture_path)
+                            texture_ref = f"{textures_subdir}/{texture_name}" if textures_subdir else texture_name
 
                             roughness_reader_path = f"{mat_path}/RoughnessTexture"
                             roughness_reader = UsdShade.Shader.Define(stage, roughness_reader_path)
                             roughness_reader.CreateIdAttr("UsdUVTexture")
-                            roughness_reader.CreateInput("file", Sdf.ValueTypeNames.Asset).Set(texture_name)
+                            roughness_reader.CreateInput("file", Sdf.ValueTypeNames.Asset).Set(texture_ref)
                             roughness_reader.CreateInput("st", Sdf.ValueTypeNames.Float2).ConnectToSource(st_output)
                             roughness_reader.CreateInput("sourceColorSpace", Sdf.ValueTypeNames.Token).Set("raw")
 
@@ -1935,11 +2019,12 @@ def export_meshes_no_skeleton(stage, geom_path, model_name, scene, mesh_nodes, i
                         if isinstance(fbx_texture, FbxFileTexture):
                             texture_path = fbx_texture.GetFileName()
                             texture_name = os.path.basename(texture_path)
+                            texture_ref = f"{textures_subdir}/{texture_name}" if textures_subdir else texture_name
 
                             metallic_reader_path = f"{mat_path}/MetallicTexture"
                             metallic_reader = UsdShade.Shader.Define(stage, metallic_reader_path)
                             metallic_reader.CreateIdAttr("UsdUVTexture")
-                            metallic_reader.CreateInput("file", Sdf.ValueTypeNames.Asset).Set(texture_name)
+                            metallic_reader.CreateInput("file", Sdf.ValueTypeNames.Asset).Set(texture_ref)
                             metallic_reader.CreateInput("st", Sdf.ValueTypeNames.Float2).ConnectToSource(st_output)
                             metallic_reader.CreateInput("sourceColorSpace", Sdf.ValueTypeNames.Token).Set("raw")
 
@@ -1959,11 +2044,12 @@ def export_meshes_no_skeleton(stage, geom_path, model_name, scene, mesh_nodes, i
                         if isinstance(fbx_texture, FbxFileTexture):
                             texture_path = fbx_texture.GetFileName()
                             texture_name = os.path.basename(texture_path)
+                            texture_ref = f"{textures_subdir}/{texture_name}" if textures_subdir else texture_name
 
                             emissive_reader_path = f"{mat_path}/EmissiveTexture"
                             emissive_reader = UsdShade.Shader.Define(stage, emissive_reader_path)
                             emissive_reader.CreateIdAttr("UsdUVTexture")
-                            emissive_reader.CreateInput("file", Sdf.ValueTypeNames.Asset).Set(texture_name)
+                            emissive_reader.CreateInput("file", Sdf.ValueTypeNames.Asset).Set(texture_ref)
                             emissive_reader.CreateInput("st", Sdf.ValueTypeNames.Float2).ConnectToSource(st_output)
 
                             emissive_output = emissive_reader.CreateOutput("rgb", Sdf.ValueTypeNames.Float3)
@@ -1978,11 +2064,12 @@ def export_meshes_no_skeleton(stage, geom_path, model_name, scene, mesh_nodes, i
                         if isinstance(fbx_texture, FbxFileTexture):
                             texture_path = fbx_texture.GetFileName()
                             texture_name = os.path.basename(texture_path)
+                            texture_ref = f"{textures_subdir}/{texture_name}" if textures_subdir else texture_name
 
                             ao_reader_path = f"{mat_path}/OcclusionTexture"
                             ao_reader = UsdShade.Shader.Define(stage, ao_reader_path)
                             ao_reader.CreateIdAttr("UsdUVTexture")
-                            ao_reader.CreateInput("file", Sdf.ValueTypeNames.Asset).Set(texture_name)
+                            ao_reader.CreateInput("file", Sdf.ValueTypeNames.Asset).Set(texture_ref)
                             ao_reader.CreateInput("st", Sdf.ValueTypeNames.Float2).ConnectToSource(st_output)
                             ao_reader.CreateInput("sourceColorSpace", Sdf.ValueTypeNames.Token).Set("raw")
 
@@ -2101,8 +2188,9 @@ def export_transform_animation_single(stage, mesh_path, scene, mesh_node, clip_i
         scale_op.Set(scale_vec, Usd.TimeCode(local_frame))
 
 
-def export_materials_only(stage, materials_scope_path, model_name, scene, mesh_nodes):
-    """Export only materials to a stage (for separate materials file)"""
+def export_materials_only(stage, materials_scope_path, model_name, scene, mesh_nodes, textures_subdir=None):
+    """Export only materials to a stage (for separate materials file).
+    If textures_subdir is provided, texture references will be prefixed with that subdirectory."""
     for mesh_node in mesh_nodes:
         fbx_mesh = mesh_node.GetMesh()
         material_elem = fbx_mesh.GetElementMaterial()
@@ -2136,11 +2224,12 @@ def export_materials_only(stage, materials_scope_path, model_name, scene, mesh_n
                         if isinstance(fbx_texture, FbxFileTexture):
                             texture_path = fbx_texture.GetFileName()
                             texture_name = os.path.basename(texture_path)
+                            texture_ref = f"{textures_subdir}/{texture_name}" if textures_subdir else texture_name
 
                             tex_reader_path = f"{mat_path}/DiffuseTexture"
                             tex_reader = UsdShade.Shader.Define(stage, tex_reader_path)
                             tex_reader.CreateIdAttr("UsdUVTexture")
-                            tex_reader.CreateInput("file", Sdf.ValueTypeNames.Asset).Set(texture_name)
+                            tex_reader.CreateInput("file", Sdf.ValueTypeNames.Asset).Set(texture_ref)
                             tex_reader.CreateInput("st", Sdf.ValueTypeNames.Float2).ConnectToSource(st_output)
 
                             diffuse_output = tex_reader.CreateOutput("rgb", Sdf.ValueTypeNames.Float3)
@@ -2161,11 +2250,12 @@ def export_materials_only(stage, materials_scope_path, model_name, scene, mesh_n
                         if isinstance(fbx_texture, FbxFileTexture):
                             texture_path = fbx_texture.GetFileName()
                             texture_name = os.path.basename(texture_path)
+                            texture_ref = f"{textures_subdir}/{texture_name}" if textures_subdir else texture_name
 
                             normal_reader_path = f"{mat_path}/NormalTexture"
                             normal_reader = UsdShade.Shader.Define(stage, normal_reader_path)
                             normal_reader.CreateIdAttr("UsdUVTexture")
-                            normal_reader.CreateInput("file", Sdf.ValueTypeNames.Asset).Set(texture_name)
+                            normal_reader.CreateInput("file", Sdf.ValueTypeNames.Asset).Set(texture_ref)
                             normal_reader.CreateInput("st", Sdf.ValueTypeNames.Float2).ConnectToSource(st_output)
                             normal_reader.CreateInput("sourceColorSpace", Sdf.ValueTypeNames.Token).Set("raw")
 
@@ -2185,11 +2275,12 @@ def export_materials_only(stage, materials_scope_path, model_name, scene, mesh_n
                         if isinstance(fbx_texture, FbxFileTexture):
                             texture_path = fbx_texture.GetFileName()
                             texture_name = os.path.basename(texture_path)
+                            texture_ref = f"{textures_subdir}/{texture_name}" if textures_subdir else texture_name
 
                             roughness_reader_path = f"{mat_path}/RoughnessTexture"
                             roughness_reader = UsdShade.Shader.Define(stage, roughness_reader_path)
                             roughness_reader.CreateIdAttr("UsdUVTexture")
-                            roughness_reader.CreateInput("file", Sdf.ValueTypeNames.Asset).Set(texture_name)
+                            roughness_reader.CreateInput("file", Sdf.ValueTypeNames.Asset).Set(texture_ref)
                             roughness_reader.CreateInput("st", Sdf.ValueTypeNames.Float2).ConnectToSource(st_output)
                             roughness_reader.CreateInput("sourceColorSpace", Sdf.ValueTypeNames.Token).Set("raw")
 
@@ -2218,11 +2309,12 @@ def export_materials_only(stage, materials_scope_path, model_name, scene, mesh_n
                         if isinstance(fbx_texture, FbxFileTexture):
                             texture_path = fbx_texture.GetFileName()
                             texture_name = os.path.basename(texture_path)
+                            texture_ref = f"{textures_subdir}/{texture_name}" if textures_subdir else texture_name
 
                             metallic_reader_path = f"{mat_path}/MetallicTexture"
                             metallic_reader = UsdShade.Shader.Define(stage, metallic_reader_path)
                             metallic_reader.CreateIdAttr("UsdUVTexture")
-                            metallic_reader.CreateInput("file", Sdf.ValueTypeNames.Asset).Set(texture_name)
+                            metallic_reader.CreateInput("file", Sdf.ValueTypeNames.Asset).Set(texture_ref)
                             metallic_reader.CreateInput("st", Sdf.ValueTypeNames.Float2).ConnectToSource(st_output)
                             metallic_reader.CreateInput("sourceColorSpace", Sdf.ValueTypeNames.Token).Set("raw")
 
@@ -2242,11 +2334,12 @@ def export_materials_only(stage, materials_scope_path, model_name, scene, mesh_n
                         if isinstance(fbx_texture, FbxFileTexture):
                             texture_path = fbx_texture.GetFileName()
                             texture_name = os.path.basename(texture_path)
+                            texture_ref = f"{textures_subdir}/{texture_name}" if textures_subdir else texture_name
 
                             emissive_reader_path = f"{mat_path}/EmissiveTexture"
                             emissive_reader = UsdShade.Shader.Define(stage, emissive_reader_path)
                             emissive_reader.CreateIdAttr("UsdUVTexture")
-                            emissive_reader.CreateInput("file", Sdf.ValueTypeNames.Asset).Set(texture_name)
+                            emissive_reader.CreateInput("file", Sdf.ValueTypeNames.Asset).Set(texture_ref)
                             emissive_reader.CreateInput("st", Sdf.ValueTypeNames.Float2).ConnectToSource(st_output)
 
                             emissive_output = emissive_reader.CreateOutput("rgb", Sdf.ValueTypeNames.Float3)
@@ -2261,11 +2354,12 @@ def export_materials_only(stage, materials_scope_path, model_name, scene, mesh_n
                         if isinstance(fbx_texture, FbxFileTexture):
                             texture_path = fbx_texture.GetFileName()
                             texture_name = os.path.basename(texture_path)
+                            texture_ref = f"{textures_subdir}/{texture_name}" if textures_subdir else texture_name
 
                             ao_reader_path = f"{mat_path}/OcclusionTexture"
                             ao_reader = UsdShade.Shader.Define(stage, ao_reader_path)
                             ao_reader.CreateIdAttr("UsdUVTexture")
-                            ao_reader.CreateInput("file", Sdf.ValueTypeNames.Asset).Set(texture_name)
+                            ao_reader.CreateInput("file", Sdf.ValueTypeNames.Asset).Set(texture_ref)
                             ao_reader.CreateInput("st", Sdf.ValueTypeNames.Float2).ConnectToSource(st_output)
                             ao_reader.CreateInput("sourceColorSpace", Sdf.ValueTypeNames.Token).Set("raw")
 
@@ -2276,8 +2370,9 @@ def export_materials_only(stage, materials_scope_path, model_name, scene, mesh_n
                 usd_material.CreateSurfaceOutput().ConnectToSource(shader.GetOutput("surface"))
 
 
-def export_materials_materialx(stage, materials_scope_path, model_name, scene, mesh_nodes):
-    """Export materials using MaterialX shaders for Reality Composer Pro"""
+def export_materials_materialx(stage, materials_scope_path, model_name, scene, mesh_nodes, textures_subdir=None):
+    """Export materials using MaterialX shaders for Reality Composer Pro.
+    If textures_subdir is provided, texture references will be prefixed with that subdirectory."""
     for mesh_node in mesh_nodes:
         fbx_mesh = mesh_node.GetMesh()
         material_elem = fbx_mesh.GetElementMaterial()
@@ -2317,11 +2412,12 @@ def export_materials_materialx(stage, materials_scope_path, model_name, scene, m
                         if isinstance(fbx_texture, FbxFileTexture):
                             texture_path = fbx_texture.GetFileName()
                             texture_name = os.path.basename(texture_path)
+                            texture_ref = f"{textures_subdir}/{texture_name}" if textures_subdir else texture_name
 
                             tex_path = f"{mat_path}/DiffuseTexture"
                             tex_shader = UsdShade.Shader.Define(stage, tex_path)
                             tex_shader.CreateIdAttr("ND_RealityKitTexture2D_color3")
-                            tex_shader.CreateInput("file", Sdf.ValueTypeNames.Asset).Set(texture_name)
+                            tex_shader.CreateInput("file", Sdf.ValueTypeNames.Asset).Set(texture_ref)
                             tex_shader.CreateInput("no_flip_v", Sdf.ValueTypeNames.Bool).Set(True)
                             tex_output = tex_shader.CreateOutput("out", Sdf.ValueTypeNames.Color3f)
 
@@ -2343,12 +2439,13 @@ def export_materials_materialx(stage, materials_scope_path, model_name, scene, m
                         if isinstance(fbx_texture, FbxFileTexture):
                             texture_path = fbx_texture.GetFileName()
                             texture_name = os.path.basename(texture_path)
+                            texture_ref = f"{textures_subdir}/{texture_name}" if textures_subdir else texture_name
 
                             # Create normal texture node
                             normal_tex_path = f"{mat_path}/NormalTexture"
                             normal_tex = UsdShade.Shader.Define(stage, normal_tex_path)
                             normal_tex.CreateIdAttr("ND_RealityKitTexture2D_color3")
-                            normal_tex.CreateInput("file", Sdf.ValueTypeNames.Asset).Set(texture_name)
+                            normal_tex.CreateInput("file", Sdf.ValueTypeNames.Asset).Set(texture_ref)
                             normal_tex.CreateInput("no_flip_v", Sdf.ValueTypeNames.Bool).Set(True)
                             normal_tex_output = normal_tex.CreateOutput("out", Sdf.ValueTypeNames.Color3f)
 
@@ -2377,11 +2474,12 @@ def export_materials_materialx(stage, materials_scope_path, model_name, scene, m
                         if isinstance(fbx_texture, FbxFileTexture):
                             texture_path = fbx_texture.GetFileName()
                             texture_name = os.path.basename(texture_path)
+                            texture_ref = f"{textures_subdir}/{texture_name}" if textures_subdir else texture_name
 
                             roughness_tex_path = f"{mat_path}/RoughnessTexture"
                             roughness_tex = UsdShade.Shader.Define(stage, roughness_tex_path)
                             roughness_tex.CreateIdAttr("ND_RealityKitTexture2D_float")
-                            roughness_tex.CreateInput("file", Sdf.ValueTypeNames.Asset).Set(texture_name)
+                            roughness_tex.CreateInput("file", Sdf.ValueTypeNames.Asset).Set(texture_ref)
                             roughness_tex.CreateInput("no_flip_v", Sdf.ValueTypeNames.Bool).Set(True)
                             roughness_tex_output = roughness_tex.CreateOutput("out", Sdf.ValueTypeNames.Float)
 
@@ -2410,11 +2508,12 @@ def export_materials_materialx(stage, materials_scope_path, model_name, scene, m
                         if isinstance(fbx_texture, FbxFileTexture):
                             texture_path = fbx_texture.GetFileName()
                             texture_name = os.path.basename(texture_path)
+                            texture_ref = f"{textures_subdir}/{texture_name}" if textures_subdir else texture_name
 
                             metallic_tex_path = f"{mat_path}/MetallicTexture"
                             metallic_tex = UsdShade.Shader.Define(stage, metallic_tex_path)
                             metallic_tex.CreateIdAttr("ND_RealityKitTexture2D_float")
-                            metallic_tex.CreateInput("file", Sdf.ValueTypeNames.Asset).Set(texture_name)
+                            metallic_tex.CreateInput("file", Sdf.ValueTypeNames.Asset).Set(texture_ref)
                             metallic_tex.CreateInput("no_flip_v", Sdf.ValueTypeNames.Bool).Set(True)
                             metallic_tex_output = metallic_tex.CreateOutput("out", Sdf.ValueTypeNames.Float)
 
@@ -2434,11 +2533,12 @@ def export_materials_materialx(stage, materials_scope_path, model_name, scene, m
                         if isinstance(fbx_texture, FbxFileTexture):
                             texture_path = fbx_texture.GetFileName()
                             texture_name = os.path.basename(texture_path)
+                            texture_ref = f"{textures_subdir}/{texture_name}" if textures_subdir else texture_name
 
                             emissive_tex_path = f"{mat_path}/EmissiveTexture"
                             emissive_tex = UsdShade.Shader.Define(stage, emissive_tex_path)
                             emissive_tex.CreateIdAttr("ND_RealityKitTexture2D_color3")
-                            emissive_tex.CreateInput("file", Sdf.ValueTypeNames.Asset).Set(texture_name)
+                            emissive_tex.CreateInput("file", Sdf.ValueTypeNames.Asset).Set(texture_ref)
                             emissive_tex.CreateInput("no_flip_v", Sdf.ValueTypeNames.Bool).Set(True)
                             emissive_tex_output = emissive_tex.CreateOutput("out", Sdf.ValueTypeNames.Color3f)
 
@@ -2454,11 +2554,12 @@ def export_materials_materialx(stage, materials_scope_path, model_name, scene, m
                         if isinstance(fbx_texture, FbxFileTexture):
                             texture_path = fbx_texture.GetFileName()
                             texture_name = os.path.basename(texture_path)
+                            texture_ref = f"{textures_subdir}/{texture_name}" if textures_subdir else texture_name
 
                             ao_tex_path = f"{mat_path}/OcclusionTexture"
                             ao_tex = UsdShade.Shader.Define(stage, ao_tex_path)
                             ao_tex.CreateIdAttr("ND_RealityKitTexture2D_float")
-                            ao_tex.CreateInput("file", Sdf.ValueTypeNames.Asset).Set(texture_name)
+                            ao_tex.CreateInput("file", Sdf.ValueTypeNames.Asset).Set(texture_ref)
                             ao_tex.CreateInput("no_flip_v", Sdf.ValueTypeNames.Bool).Set(True)
                             ao_tex_output = ao_tex.CreateOutput("out", Sdf.ValueTypeNames.Float)
 
@@ -2487,16 +2588,33 @@ def bind_materials_from_reference(stage, geom_path, materials_path, scene, mesh_
                         UsdShade.MaterialBindingAPI(mesh_prim).Bind(usd_material)
 
 
-def convert_fbx_to_usd_separate(fbx_path, usd_path, use_materialx=False):
+def convert_fbx_to_usd_separate(fbx_path, usd_path, use_materialx=False, use_directory_structure=False):
     """Export FBX as separate USD files: main model, per-animation files, and parent file"""
 
     # Parse output path
-    output_dir = os.path.dirname(usd_path)
     base_name = os.path.splitext(os.path.basename(usd_path))[0]
     ext = os.path.splitext(usd_path)[1] or '.usda'
 
-    if output_dir and not os.path.exists(output_dir):
-        os.makedirs(output_dir)
+    if use_directory_structure:
+        # Create organized directory structure
+        parent_dir = os.path.dirname(usd_path) or '.'
+        output_dir = os.path.join(parent_dir, base_name)
+        animations_dir = os.path.join(output_dir, "Animations")
+        textures_dir = os.path.join(output_dir, "Textures")
+        textures_subdir = "Textures"
+        animations_subdir = "Animations"
+        os.makedirs(output_dir, exist_ok=True)
+        os.makedirs(animations_dir, exist_ok=True)
+        os.makedirs(textures_dir, exist_ok=True)
+    else:
+        # Flat structure (original behavior)
+        output_dir = os.path.dirname(usd_path)
+        animations_dir = output_dir
+        textures_dir = output_dir
+        textures_subdir = None
+        animations_subdir = None
+        if output_dir and not os.path.exists(output_dir):
+            os.makedirs(output_dir)
 
     # Load FBX scene
     manager, scene = load_fbx_scene(fbx_path)
@@ -2524,7 +2642,7 @@ def convert_fbx_to_usd_separate(fbx_path, usd_path, use_materialx=False):
         # No skeleton found - delegate to non-skeletal code path
         print("No skeleton found - using non-skeletal export path")
         manager.Destroy()
-        return convert_fbx_to_usd_separate_no_skeleton(fbx_path, usd_path, use_materialx)
+        return convert_fbx_to_usd_separate_no_skeleton(fbx_path, usd_path, use_materialx, use_directory_structure)
 
     # Collect joints
     joints, joint_paths = collect_joints(skel_root_joint)
@@ -2574,9 +2692,9 @@ def convert_fbx_to_usd_separate(fbx_path, usd_path, use_materialx=False):
 
     # Export materials to this stage
     if use_materialx:
-        export_materials_materialx(materials_stage, "/Materials", model_name, scene, mesh_nodes)
+        export_materials_materialx(materials_stage, "/Materials", model_name, scene, mesh_nodes, textures_subdir=textures_subdir)
     else:
-        export_materials_only(materials_stage, "/Materials", model_name, scene, mesh_nodes)
+        export_materials_only(materials_stage, "/Materials", model_name, scene, mesh_nodes, textures_subdir=textures_subdir)
 
     materials_stage.GetRootLayer().Save()
     print(f"✓ Saved materials: {materials_usd_path}")
@@ -2617,7 +2735,7 @@ def convert_fbx_to_usd_separate(fbx_path, usd_path, use_materialx=False):
     anim_files = []
     for clip_info in clips_info:
         take_name = clip_info['name']
-        anim_usd_path = os.path.join(output_dir, f"{base_name}-{take_name}{ext}") if output_dir else f"{base_name}-{take_name}{ext}"
+        anim_usd_path = os.path.join(animations_dir, f"{base_name}-{take_name}{ext}") if animations_dir else f"{base_name}-{take_name}{ext}"
         anim_files.append((take_name, os.path.basename(anim_usd_path)))
 
         anim_stage = Usd.Stage.CreateNew(anim_usd_path)
@@ -2645,16 +2763,18 @@ def convert_fbx_to_usd_separate(fbx_path, usd_path, use_materialx=False):
 
         # Reference mesh from main file and materials from materials file
         main_file_basename = os.path.basename(main_usd_path)
+        # Use ../ prefix if animation is in subdirectory
+        ref_prefix = "../" if animations_subdir else "./"
 
         # Reference Geom (mesh)
         anim_geom_path = f"{anim_skel_root_path}/Geom"
         geom_prim = anim_stage.DefinePrim(anim_geom_path)
-        geom_prim.GetReferences().AddReference(f"./{main_file_basename}", f"/{model_name}/Root/Geom")
+        geom_prim.GetReferences().AddReference(f"{ref_prefix}{main_file_basename}", f"/{model_name}/Root/Geom")
 
         # Reference Materials from materials file
         anim_materials_path = f"/{model_name}/Materials"
         materials_prim = anim_stage.DefinePrim(anim_materials_path)
-        materials_prim.GetReferences().AddReference(f"./{materials_file_basename}", "/Materials")
+        materials_prim.GetReferences().AddReference(f"{ref_prefix}{materials_file_basename}", "/Materials")
 
         # Override material bindings on the referenced mesh to use local materials path
         # This is needed because the main file's mesh binds to its own materials path,
@@ -2712,7 +2832,9 @@ def convert_fbx_to_usd_separate(fbx_path, usd_path, use_materialx=False):
             anim_file_prim = parent_stage.DefinePrim(anim_file_prim_path, "RealityKitAnimationFile")
 
             file_attr = anim_file_prim.CreateAttribute("file", Sdf.ValueTypeNames.Asset, custom=True)
-            file_attr.Set(f"./{anim_filename}")
+            # Use Animations/ subdirectory if directory structure is enabled
+            anim_ref = f"./{animations_subdir}/{anim_filename}" if animations_subdir else f"./{anim_filename}"
+            file_attr.Set(anim_ref)
 
             name_attr = anim_file_prim.CreateAttribute("name", Sdf.ValueTypeNames.String, custom=True)
             name_attr.Set(take_name)
@@ -2720,10 +2842,10 @@ def convert_fbx_to_usd_separate(fbx_path, usd_path, use_materialx=False):
     parent_stage.GetRootLayer().Save()
     print(f"✓ Saved parent file: {parent_usd_path}")
 
-    # Copy textures to output directory
+    # Copy textures to output directory (use textures_dir for organized structure)
     texture_paths = collect_texture_paths(mesh_nodes)
-    if texture_paths and output_dir:
-        copied_textures = copy_textures_to_output(texture_paths, output_dir)
+    if texture_paths and textures_dir:
+        copied_textures = copy_textures_to_output(texture_paths, textures_dir)
         if copied_textures:
             print(f"✓ Copied {len(copied_textures)} texture(s)")
 
@@ -2794,19 +2916,36 @@ modelRoot.playAnimation(
     print(f"  - {parent_usd_path} (parent with AnimationLibrary)")
 
 
-def convert_fbx_to_usd_separate_no_skeleton(fbx_path, usd_path, use_materialx=False):
+def convert_fbx_to_usd_separate_no_skeleton(fbx_path, usd_path, use_materialx=False, use_directory_structure=False):
     """Export FBX without skeleton as separate USD files: main model, per-animation files, and parent file.
 
     This is a separate code path for models without skeletons.
     Animations are exported as time-sampled transforms on mesh Xforms.
     """
     # Parse output path
-    output_dir = os.path.dirname(usd_path)
     base_name = os.path.splitext(os.path.basename(usd_path))[0]
     ext = os.path.splitext(usd_path)[1] or '.usda'
 
-    if output_dir and not os.path.exists(output_dir):
-        os.makedirs(output_dir)
+    if use_directory_structure:
+        # Create organized directory structure
+        parent_dir = os.path.dirname(usd_path) or '.'
+        output_dir = os.path.join(parent_dir, base_name)
+        animations_dir = os.path.join(output_dir, "Animations")
+        textures_dir = os.path.join(output_dir, "Textures")
+        textures_subdir = "Textures"
+        animations_subdir = "Animations"
+        os.makedirs(output_dir, exist_ok=True)
+        os.makedirs(animations_dir, exist_ok=True)
+        os.makedirs(textures_dir, exist_ok=True)
+    else:
+        # Flat structure (original behavior)
+        output_dir = os.path.dirname(usd_path)
+        animations_dir = output_dir
+        textures_dir = output_dir
+        textures_subdir = None
+        animations_subdir = None
+        if output_dir and not os.path.exists(output_dir):
+            os.makedirs(output_dir)
 
     # Load FBX scene
     manager, scene = load_fbx_scene(fbx_path)
@@ -2863,9 +3002,9 @@ def convert_fbx_to_usd_separate_no_skeleton(fbx_path, usd_path, use_materialx=Fa
 
     # Export materials to this stage
     if use_materialx:
-        export_materials_materialx(materials_stage, "/Materials", model_name, scene, mesh_nodes)
+        export_materials_materialx(materials_stage, "/Materials", model_name, scene, mesh_nodes, textures_subdir=textures_subdir)
     else:
-        export_materials_only(materials_stage, "/Materials", model_name, scene, mesh_nodes)
+        export_materials_only(materials_stage, "/Materials", model_name, scene, mesh_nodes, textures_subdir=textures_subdir)
 
     materials_stage.GetRootLayer().Save()
     print(f"✓ Saved materials: {materials_usd_path}")
@@ -2898,9 +3037,12 @@ def convert_fbx_to_usd_separate_no_skeleton(fbx_path, usd_path, use_materialx=Fa
 
     # --- 2. Export Each Animation Take ---
     anim_files = []
+    # Reference prefix for animation files pointing back to parent directory
+    ref_prefix = "../" if animations_subdir else "./"
+
     for clip_info in clips_info:
         take_name = clip_info['name']
-        anim_usd_path = os.path.join(output_dir, f"{base_name}-{take_name}{ext}") if output_dir else f"{base_name}-{take_name}{ext}"
+        anim_usd_path = os.path.join(animations_dir, f"{base_name}-{take_name}{ext}") if animations_dir else f"{base_name}-{take_name}{ext}"
         anim_files.append((take_name, os.path.basename(anim_usd_path)))
 
         anim_stage = Usd.Stage.CreateNew(anim_usd_path)
@@ -2920,12 +3062,12 @@ def convert_fbx_to_usd_separate_no_skeleton(fbx_path, usd_path, use_materialx=Fa
         main_file_basename = os.path.basename(main_usd_path)
         anim_geom_path = f"/{model_name}/Geom"
         geom_prim = anim_stage.DefinePrim(anim_geom_path)
-        geom_prim.GetReferences().AddReference(f"./{main_file_basename}", f"/{model_name}/Geom")
+        geom_prim.GetReferences().AddReference(f"{ref_prefix}{main_file_basename}", f"/{model_name}/Geom")
 
         # Reference Materials from materials file
         anim_materials_path = f"/{model_name}/Materials"
         materials_prim = anim_stage.DefinePrim(anim_materials_path)
-        materials_prim.GetReferences().AddReference(f"./{materials_file_basename}", "/Materials")
+        materials_prim.GetReferences().AddReference(f"{ref_prefix}{materials_file_basename}", "/Materials")
 
         # Export transform animations for each mesh
         for mesh_node in mesh_nodes:
@@ -2991,7 +3133,9 @@ def convert_fbx_to_usd_separate_no_skeleton(fbx_path, usd_path, use_materialx=Fa
             anim_file_prim = parent_stage.DefinePrim(anim_file_prim_path, "RealityKitAnimationFile")
 
             file_attr = anim_file_prim.CreateAttribute("file", Sdf.ValueTypeNames.Asset, custom=True)
-            file_attr.Set(f"./{anim_filename}")
+            # Use Animations/ subdirectory if directory structure is enabled
+            anim_ref = f"./{animations_subdir}/{anim_filename}" if animations_subdir else f"./{anim_filename}"
+            file_attr.Set(anim_ref)
 
             name_attr = anim_file_prim.CreateAttribute("name", Sdf.ValueTypeNames.String, custom=True)
             name_attr.Set(take_name)
@@ -2999,10 +3143,10 @@ def convert_fbx_to_usd_separate_no_skeleton(fbx_path, usd_path, use_materialx=Fa
     parent_stage.GetRootLayer().Save()
     print(f"✓ Saved parent file: {parent_usd_path}")
 
-    # Copy textures to output directory
+    # Copy textures to output directory (use textures_dir for organized structure)
     texture_paths = collect_texture_paths(mesh_nodes)
-    if texture_paths and output_dir:
-        copied_textures = copy_textures_to_output(texture_paths, output_dir)
+    if texture_paths and textures_dir:
+        copied_textures = copy_textures_to_output(texture_paths, textures_dir)
         if copied_textures:
             print(f"✓ Copied {len(copied_textures)} texture(s)")
 
@@ -3071,7 +3215,7 @@ modelRoot.playAnimation(
     print(f"  - {materials_usd_path} (materials)")
     print(f"  - {main_usd_path} (main model)")
     for take_name, anim_filename in anim_files:
-        print(f"  - {os.path.join(output_dir, anim_filename) if output_dir else anim_filename} ({take_name} animation)")
+        print(f"  - {os.path.join(animations_dir, anim_filename) if animations_dir else anim_filename} ({take_name} animation)")
     if anim_files:
         print(f"  - {parent_usd_path} (parent with AnimationLibrary)")
 
@@ -3098,6 +3242,8 @@ Examples:
                         help='Export each animation as a separate USD file')
     parser.add_argument('-m', '--materialx', action='store_true',
                         help='Use MaterialX shaders instead of UsdPreviewSurface (for Reality Composer Pro)')
+    parser.add_argument('-d', '--directory-structure', action='store_true',
+                        help='Create organized directory structure with Textures/ subdirectory (and Animations/ when using -s)')
 
     args = parser.parse_args()
 
@@ -3107,9 +3253,9 @@ Examples:
 
     try:
         if args.separate_animations:
-            convert_fbx_to_usd_separate(args.input, args.output, use_materialx=args.materialx)
+            convert_fbx_to_usd_separate(args.input, args.output, use_materialx=args.materialx, use_directory_structure=args.directory_structure)
         else:
-            convert_fbx_to_usd(args.input, args.output, use_materialx=args.materialx)
+            convert_fbx_to_usd(args.input, args.output, use_materialx=args.materialx, use_directory_structure=args.directory_structure)
     except Exception as e:
         print(f"Error: {e}")
         import traceback

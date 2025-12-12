@@ -8,6 +8,7 @@ A Python command-line tool for converting FBX files to USD (Universal Scene Desc
 - **Non-Skeletal Animation Support**: Exports transform-based animations for models without skeletons
 - **Multiple Animation Takes**: Concatenates into single timeline, or exports as separate files
 - **Separate Animation Export**: Export each animation take as a separate USD file with RealityKit AnimationLibrary
+- **Directory Structure**: Optional organized output with `Textures/` and `Animations/` subdirectories
 - **RealityKit Compatible**: Creates animation libraries with clip definitions for both skeletal and non-skeletal models
 - **PBR Materials**: Converts materials with support for:
   - Diffuse/Albedo textures
@@ -152,6 +153,47 @@ MaterialX export uses RealityKit-specific shader nodes:
 - `ND_normal_map_decode` - Normal map decoder
 
 **Note**: MaterialX is primarily useful when you want to edit materials in Reality Composer Pro's visual ShaderGraph. For general use, the default UsdPreviewSurface materials are more widely compatible.
+
+### Directory Structure Export
+
+Use the `-d` or `--directory-structure` flag to create an organized directory hierarchy for output files:
+
+```bash
+python3 fbx2usd -d character.fbx output/Character.usda
+```
+
+This creates a root directory named after the output file, with textures organized in a `Textures/` subdirectory:
+
+```
+Character/
+├── Character.usda
+└── Textures/
+    ├── diffuse.png
+    └── normal.png
+```
+
+When combined with `-s` (separate animations), animations are also organized in an `Animations/` subdirectory:
+
+```bash
+python3 fbx2usd -s -d character.fbx output/Character.usda
+```
+
+Creates:
+```
+Character/
+├── Character_parent.usda        (main entry point)
+├── Character.usda               (model with skeleton/mesh)
+├── Character_materials.usda     (materials and shaders)
+├── Animations/
+│   ├── Character-Walk.usda
+│   └── Character-Run.usda
+├── Textures/
+│   ├── diffuse.png
+│   └── normal.png
+└── README.md
+```
+
+All USD references are automatically updated to point to the correct subdirectory locations.
 
 ## How It Works
 
