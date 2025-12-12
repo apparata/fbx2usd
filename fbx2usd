@@ -2679,7 +2679,7 @@ def convert_fbx_to_usd_separate(fbx_path, usd_path, use_materialx=False, use_dir
         })
 
     # --- 0. Export Materials to separate file ---
-    materials_usd_path = os.path.join(output_dir, f"{base_name}-materials{ext}") if output_dir else f"{base_name}-materials{ext}"
+    materials_usd_path = os.path.join(output_dir, f"{base_name}-Materials{ext}") if output_dir else f"{base_name}-Materials{ext}"
     materials_file_basename = os.path.basename(materials_usd_path)
 
     materials_stage = Usd.Stage.CreateNew(materials_usd_path)
@@ -2967,7 +2967,7 @@ def convert_fbx_to_usd_separate_no_skeleton(fbx_path, usd_path, use_materialx=Fa
         })
 
     # --- 0. Export Materials to separate file ---
-    materials_usd_path = os.path.join(output_dir, f"{base_name}-materials{ext}") if output_dir else f"{base_name}-materials{ext}"
+    materials_usd_path = os.path.join(output_dir, f"{base_name}-Materials{ext}") if output_dir else f"{base_name}-Materials{ext}"
     materials_file_basename = os.path.basename(materials_usd_path)
 
     materials_stage = Usd.Stage.CreateNew(materials_usd_path)
@@ -3187,7 +3187,7 @@ Examples:
   fbx2usd -s input.fbx output/Character.usda
       Export separate USD files for each animation take:
         - Character.usda (main model with AnimationLibrary)
-        - Character_materials.usda (materials and shaders)
+        - Character-Materials.usda (materials and shaders)
         - Character-<take>.usda (individual animation files)
 '''
     )

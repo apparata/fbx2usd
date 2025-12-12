@@ -99,7 +99,7 @@ python3 fbx2usd -s character.fbx output/Character.usda
 
 This creates:
 - `Character.usda` - **Main entry point** with model, skeleton/mesh, and AnimationLibrary
-- `Character_materials.usda` - Materials and shaders
+- `Character-Materials.usda` - Materials and shaders
 - `Character-<animation>.usda` - Individual animation files (one per take)
 - `README.md` - Usage instructions and Swift code example
 - Texture files are automatically copied to the output directory
@@ -181,7 +181,7 @@ Creates:
 ```
 Character/
 ├── Character.usda               (main entry point with model and AnimationLibrary)
-├── Character_materials.usda     (materials and shaders)
+├── Character-Materials.usda     (materials and shaders)
 ├── Animations/
 │   ├── Character-Walk.usda
 │   └── Character-Run.usda
