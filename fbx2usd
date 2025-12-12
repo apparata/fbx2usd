@@ -2679,7 +2679,7 @@ def convert_fbx_to_usd_separate(fbx_path, usd_path, use_materialx=False, use_dir
         })
 
     # --- 0. Export Materials to separate file ---
-    materials_usd_path = os.path.join(output_dir, f"{base_name}_materials{ext}") if output_dir else f"{base_name}_materials{ext}"
+    materials_usd_path = os.path.join(output_dir, f"{base_name}-materials{ext}") if output_dir else f"{base_name}-materials{ext}"
     materials_file_basename = os.path.basename(materials_usd_path)
 
     materials_stage = Usd.Stage.CreateNew(materials_usd_path)
@@ -2728,8 +2728,7 @@ def convert_fbx_to_usd_separate(fbx_path, usd_path, use_materialx=False, use_dir
     # Bind materials to meshes
     bind_materials_from_reference(main_stage, geom_path, main_materials_path, scene, mesh_nodes)
 
-    main_stage.GetRootLayer().Save()
-    print(f"✓ Saved main model: {main_usd_path}")
+    # Note: We save main_stage after adding AnimationLibrary (below)
 
     # --- 2. Export Each Animation Take ---
     anim_files = []
@@ -2800,27 +2799,10 @@ def convert_fbx_to_usd_separate(fbx_path, usd_path, use_materialx=False, use_dir
         anim_stage.GetRootLayer().Save()
         print(f"✓ Saved animation: {anim_usd_path}")
 
-    # --- 3. Export Parent File ---
-    parent_usd_path = os.path.join(output_dir, f"{base_name}_parent{ext}") if output_dir else f"{base_name}_parent{ext}"
-
-    parent_stage = Usd.Stage.CreateNew(parent_usd_path)
-    UsdGeom.SetStageUpAxis(parent_stage, UsdGeom.Tokens.y)
-    UsdGeom.SetStageMetersPerUnit(parent_stage, 1.0)
-
-    # Create Root Xform as default prim
-    parent_root = UsdGeom.Xform.Define(parent_stage, "/Root")
-    parent_stage.SetDefaultPrim(parent_root.GetPrim())
-
-    # Reference main model
-    main_file_basename = os.path.basename(main_usd_path)
-    model_prim_path = f"/Root/{model_name}"
-    model_prim = parent_stage.DefinePrim(model_prim_path)
-    model_prim.GetReferences().AddReference(f"./{main_file_basename}")
-
-    # Create AnimationLibrary
+    # --- 3. Add AnimationLibrary to main model file and save ---
     if anim_files:
-        anim_lib_path = f"{model_prim_path}/AnimationLibrary"
-        anim_lib_prim = parent_stage.DefinePrim(anim_lib_path, "RealityKitComponent")
+        anim_lib_path = f"/{model_name}/AnimationLibrary"
+        anim_lib_prim = main_stage.DefinePrim(anim_lib_path, "RealityKitComponent")
 
         info_id_attr = anim_lib_prim.CreateAttribute(
             "info:id", Sdf.ValueTypeNames.Token, custom=True
@@ -2829,7 +2811,7 @@ def convert_fbx_to_usd_separate(fbx_path, usd_path, use_materialx=False, use_dir
 
         for take_name, anim_filename in anim_files:
             anim_file_prim_path = f"{anim_lib_path}/{take_name}"
-            anim_file_prim = parent_stage.DefinePrim(anim_file_prim_path, "RealityKitAnimationFile")
+            anim_file_prim = main_stage.DefinePrim(anim_file_prim_path, "RealityKitAnimationFile")
 
             file_attr = anim_file_prim.CreateAttribute("file", Sdf.ValueTypeNames.Asset, custom=True)
             # Use Animations/ subdirectory if directory structure is enabled
@@ -2839,8 +2821,8 @@ def convert_fbx_to_usd_separate(fbx_path, usd_path, use_materialx=False, use_dir
             name_attr = anim_file_prim.CreateAttribute("name", Sdf.ValueTypeNames.String, custom=True)
             name_attr.Set(take_name)
 
-    parent_stage.GetRootLayer().Save()
-    print(f"✓ Saved parent file: {parent_usd_path}")
+    main_stage.GetRootLayer().Save()
+    print(f"✓ Saved main model: {main_usd_path}")
 
     # Copy textures to output directory (use textures_dir for organized structure)
     texture_paths = collect_texture_paths(mesh_nodes)
@@ -2852,8 +2834,7 @@ def convert_fbx_to_usd_separate(fbx_path, usd_path, use_materialx=False, use_dir
     # Write README.md
     if output_dir:
         readme_path = os.path.join(output_dir, "README.md")
-        parent_filename = os.path.basename(parent_usd_path)
-        parent_name = os.path.splitext(parent_filename)[0]
+        main_filename = os.path.basename(main_usd_path)
         first_anim = anim_files[0][0] if anim_files else "Idle"
         readme_content = f"""# {model_name} USD Files
 
@@ -2861,14 +2842,13 @@ This directory contains USD files exported from an FBX file with separate animat
 
 ## Usage in Reality Composer Pro
 
-**Add `{parent_filename}` to your Reality Composer Pro project.** All other files will be brought in automatically because they are referenced.
+**Add `{main_filename}` to your Reality Composer Pro project.** All other files will be brought in automatically because they are referenced.
 
 ## File Structure
 
-- `{parent_filename}` - **Main entry point** with AnimationLibrary referencing all animations
-- `{os.path.basename(main_usd_path)}` - Model with skeleton and mesh
+- `{main_filename}` - **Main entry point** with model, skeleton, mesh, and AnimationLibrary
 - `{os.path.basename(materials_usd_path)}` - Materials and shaders
-- `{base_name}-<animation>.usda` - Individual animation files
+- `{base_name}-<animation>{ext}` - Individual animation files
 
 ## Animations
 
@@ -2883,8 +2863,7 @@ The following animations are available in the AnimationLibrary:
 
 ```swift
 guard
-    let modelParent = scene.findEntity(named: "{parent_name}"),
-    let modelRoot = modelParent.findEntity(named: "{model_name}"),
+    let modelRoot = scene.findEntity(named: "{model_name}"),
     let animationLibrary = modelRoot.components[AnimationLibraryComponent.self]
 else {{
     return
@@ -2908,12 +2887,11 @@ modelRoot.playAnimation(
 
     manager.Destroy()
 
-    print(f"\nGenerated {len(anim_files) + 3} USD files:")
+    print(f"\nGenerated {len(anim_files) + 2} USD files:")
     print(f"  - {materials_usd_path} (materials)")
-    print(f"  - {main_usd_path} (main model)")
+    print(f"  - {main_usd_path} (main model with AnimationLibrary)")
     for take_name, anim_filename in anim_files:
-        print(f"  - {os.path.join(output_dir, anim_filename) if output_dir else anim_filename} ({take_name} animation)")
-    print(f"  - {parent_usd_path} (parent with AnimationLibrary)")
+        print(f"  - {os.path.join(animations_dir, anim_filename) if animations_dir else anim_filename} ({take_name} animation)")
 
 
 def convert_fbx_to_usd_separate_no_skeleton(fbx_path, usd_path, use_materialx=False, use_directory_structure=False):
@@ -2989,7 +2967,7 @@ def convert_fbx_to_usd_separate_no_skeleton(fbx_path, usd_path, use_materialx=Fa
         })
 
     # --- 0. Export Materials to separate file ---
-    materials_usd_path = os.path.join(output_dir, f"{base_name}_materials{ext}") if output_dir else f"{base_name}_materials{ext}"
+    materials_usd_path = os.path.join(output_dir, f"{base_name}-materials{ext}") if output_dir else f"{base_name}-materials{ext}"
     materials_file_basename = os.path.basename(materials_usd_path)
 
     materials_stage = Usd.Stage.CreateNew(materials_usd_path)
@@ -3032,8 +3010,7 @@ def convert_fbx_to_usd_separate_no_skeleton(fbx_path, usd_path, use_materialx=Fa
     # Bind materials to meshes
     bind_materials_from_reference(main_stage, geom_path, main_materials_path, scene, mesh_nodes)
 
-    main_stage.GetRootLayer().Save()
-    print(f"✓ Saved main model: {main_usd_path}")
+    # Note: We save main_stage after adding AnimationLibrary (below)
 
     # --- 2. Export Each Animation Take ---
     anim_files = []
@@ -3101,27 +3078,10 @@ def convert_fbx_to_usd_separate_no_skeleton(fbx_path, usd_path, use_materialx=Fa
         anim_stage.GetRootLayer().Save()
         print(f"✓ Saved animation: {anim_usd_path}")
 
-    # --- 3. Export Parent File ---
-    parent_usd_path = os.path.join(output_dir, f"{base_name}_parent{ext}") if output_dir else f"{base_name}_parent{ext}"
-
-    parent_stage = Usd.Stage.CreateNew(parent_usd_path)
-    UsdGeom.SetStageUpAxis(parent_stage, UsdGeom.Tokens.y)
-    UsdGeom.SetStageMetersPerUnit(parent_stage, 1.0)
-
-    # Create Root Xform as default prim
-    parent_root = UsdGeom.Xform.Define(parent_stage, "/Root")
-    parent_stage.SetDefaultPrim(parent_root.GetPrim())
-
-    # Reference main model
-    main_file_basename = os.path.basename(main_usd_path)
-    model_prim_path = f"/Root/{model_name}"
-    model_prim = parent_stage.DefinePrim(model_prim_path)
-    model_prim.GetReferences().AddReference(f"./{main_file_basename}")
-
-    # Create AnimationLibrary
+    # --- 3. Add AnimationLibrary to main model file and save ---
     if anim_files:
-        anim_lib_path = f"{model_prim_path}/AnimationLibrary"
-        anim_lib_prim = parent_stage.DefinePrim(anim_lib_path, "RealityKitComponent")
+        anim_lib_path = f"/{model_name}/AnimationLibrary"
+        anim_lib_prim = main_stage.DefinePrim(anim_lib_path, "RealityKitComponent")
 
         info_id_attr = anim_lib_prim.CreateAttribute(
             "info:id", Sdf.ValueTypeNames.Token, custom=True
@@ -3130,7 +3090,7 @@ def convert_fbx_to_usd_separate_no_skeleton(fbx_path, usd_path, use_materialx=Fa
 
         for take_name, anim_filename in anim_files:
             anim_file_prim_path = f"{anim_lib_path}/{take_name}"
-            anim_file_prim = parent_stage.DefinePrim(anim_file_prim_path, "RealityKitAnimationFile")
+            anim_file_prim = main_stage.DefinePrim(anim_file_prim_path, "RealityKitAnimationFile")
 
             file_attr = anim_file_prim.CreateAttribute("file", Sdf.ValueTypeNames.Asset, custom=True)
             # Use Animations/ subdirectory if directory structure is enabled
@@ -3140,8 +3100,8 @@ def convert_fbx_to_usd_separate_no_skeleton(fbx_path, usd_path, use_materialx=Fa
             name_attr = anim_file_prim.CreateAttribute("name", Sdf.ValueTypeNames.String, custom=True)
             name_attr.Set(take_name)
 
-    parent_stage.GetRootLayer().Save()
-    print(f"✓ Saved parent file: {parent_usd_path}")
+    main_stage.GetRootLayer().Save()
+    print(f"✓ Saved main model: {main_usd_path}")
 
     # Copy textures to output directory (use textures_dir for organized structure)
     texture_paths = collect_texture_paths(mesh_nodes)
@@ -3153,8 +3113,7 @@ def convert_fbx_to_usd_separate_no_skeleton(fbx_path, usd_path, use_materialx=Fa
     # Write README.md
     if output_dir:
         readme_path = os.path.join(output_dir, "README.md")
-        parent_filename = os.path.basename(parent_usd_path)
-        parent_name = os.path.splitext(parent_filename)[0]
+        main_filename = os.path.basename(main_usd_path)
         first_anim = anim_files[0][0] if anim_files else "Idle"
         readme_content = f"""# {model_name} USD Files
 
@@ -3163,14 +3122,13 @@ This model does not have a skeleton - animations are transform-based.
 
 ## Usage in Reality Composer Pro
 
-**Add `{parent_filename}` to your Reality Composer Pro project.** All other files will be brought in automatically because they are referenced.
+**Add `{main_filename}` to your Reality Composer Pro project.** All other files will be brought in automatically because they are referenced.
 
 ## File Structure
 
-- `{parent_filename}` - **Main entry point** with AnimationLibrary referencing all animations
-- `{os.path.basename(main_usd_path)}` - Model with mesh geometry
+- `{main_filename}` - **Main entry point** with model, mesh, and AnimationLibrary
 - `{os.path.basename(materials_usd_path)}` - Materials and shaders
-- `{base_name}-<animation>.usda` - Individual animation files
+- `{base_name}-<animation>{ext}` - Individual animation files
 
 ## Animations
 
@@ -3185,8 +3143,7 @@ The following animations are available in the AnimationLibrary:
 
 ```swift
 guard
-    let modelParent = scene.findEntity(named: "{parent_name}"),
-    let modelRoot = modelParent.findEntity(named: "{model_name}"),
+    let modelRoot = scene.findEntity(named: "{model_name}"),
     let animationLibrary = modelRoot.components[AnimationLibraryComponent.self]
 else {{
     return
@@ -3210,14 +3167,12 @@ modelRoot.playAnimation(
 
     manager.Destroy()
 
-    file_count = len(anim_files) + 3 if anim_files else 2
+    file_count = len(anim_files) + 2 if anim_files else 2
     print(f"\nGenerated {file_count} USD files:")
     print(f"  - {materials_usd_path} (materials)")
-    print(f"  - {main_usd_path} (main model)")
+    print(f"  - {main_usd_path} (main model with AnimationLibrary)")
     for take_name, anim_filename in anim_files:
         print(f"  - {os.path.join(animations_dir, anim_filename) if animations_dir else anim_filename} ({take_name} animation)")
-    if anim_files:
-        print(f"  - {parent_usd_path} (parent with AnimationLibrary)")
 
 
 def main():
@@ -3231,9 +3186,9 @@ Examples:
 
   fbx2usd -s input.fbx output/Character.usda
       Export separate USD files for each animation take:
-        - Character.usda (model without animation)
-        - Character-<take>.usda (full model with each animation)
-        - Character_parent.usda (parent file with AnimationLibrary)
+        - Character.usda (main model with AnimationLibrary)
+        - Character_materials.usda (materials and shaders)
+        - Character-<take>.usda (individual animation files)
 '''
     )
     parser.add_argument('input', help='Input FBX file path')

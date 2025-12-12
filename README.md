@@ -98,14 +98,13 @@ python3 fbx2usd -s character.fbx output/Character.usda
 ```
 
 This creates:
+- `Character.usda` - **Main entry point** with model, skeleton/mesh, and AnimationLibrary
 - `Character_materials.usda` - Materials and shaders
-- `Character.usda` - Model with skeleton/mesh (or just mesh for non-skeletal models)
 - `Character-<animation>.usda` - Individual animation files (one per take)
-- `Character_parent.usda` - **Main entry point** with AnimationLibrary
 - `README.md` - Usage instructions and Swift code example
 - Texture files are automatically copied to the output directory
 
-**In Reality Composer Pro**, add `Character_parent.usda` to your project. All other files will be brought in automatically because they are referenced. `Character_parent.usda` is also the file you should drag into the scene.
+**In Reality Composer Pro**, add `Character.usda` to your project. All other files will be brought in automatically because they are referenced. `Character.usda` is the file you should drag into the scene.
 
 The same output structure is used for both skeletal and non-skeletal models, making the workflow consistent regardless of animation type.
 
@@ -181,8 +180,7 @@ python3 fbx2usd -s -d character.fbx output/Character.usda
 Creates:
 ```
 Character/
-├── Character_parent.usda        (main entry point)
-├── Character.usda               (model with skeleton/mesh)
+├── Character.usda               (main entry point with model and AnimationLibrary)
 ├── Character_materials.usda     (materials and shaders)
 ├── Animations/
 │   ├── Character-Walk.usda
@@ -310,7 +308,7 @@ Options:
 
 Inspect a USD file with all referenced files:
 ```bash
-python3 usdinspect Character_parent.usdc
+python3 usdinspect Character.usdc
 ```
 
 Inspect only the specified file (don't follow references):
@@ -320,13 +318,13 @@ python3 usdinspect Character.usda --no-recursive
 
 Open the output in Marked 2 for preview:
 ```bash
-python3 usdinspect Character_parent.usdc -m
+python3 usdinspect Character.usdc -m
 ```
 
 ## Output Example
 
 ```markdown
-# Character_parent.usdc
+# Character.usdc
 
 ## Stage Info
 
@@ -349,19 +347,20 @@ python3 usdinspect Character_parent.usdc -m
 
 ## Prim Hierarchy
 
-Root (Xform)
-└── Character (Xform)
-    ├── Root (SkelRoot)
-    │   ├── Skeleton (Skeleton)
-    │   └── Geom (Scope)
-    │       └── Character (Mesh)
-    └── AnimationLibrary (RealityKitComponent)
-        ├── Idle (RealityKitAnimationFile)
-        └── Walk (RealityKitAnimationFile)
+Character (Xform)
+├── Root (SkelRoot)
+│   ├── Skeleton (Skeleton)
+│   └── Geom (Scope)
+│       └── Character (Mesh)
+├── Materials (Scope)
+│   └── Material (Material)
+└── AnimationLibrary (RealityKitComponent)
+    ├── Idle (RealityKitAnimationFile)
+    └── Walk (RealityKitAnimationFile)
 
 ## RealityKit Animation Library
 
-**Path:** `/Root/Character/AnimationLibrary`
+**Path:** `/Character/AnimationLibrary`
 
 ### Animations
 
