@@ -1,0 +1,218 @@
+#!/usr/bin/env python3
+"""
+fbxunit - FBX unit scale converter
+
+Converts an FBX file from one unit system to another, scaling all geometry,
+transforms, and animations appropriately.
+
+Usage:
+    python3 fbxunit <input.fbx> <output.fbx> <unit>
+
+Where <unit> is one of:
+    m, meters       - Convert to meters
+    cm, centimeters - Convert to centimeters
+    mm, millimeters - Convert to millimeters
+    in, inches      - Convert to inches
+    ft, feet        - Convert to feet
+
+Example:
+    python3 fbxunit model.fbx model_meters.fbx m
+"""
+
+import sys
+import os
+import argparse
+
+try:
+    from fbx import *
+except ImportError:
+    print("Error: FBX Python SDK not found.", file=sys.stderr)
+    print("Please install the Autodesk FBX SDK from:", file=sys.stderr)
+    print("https://aps.autodesk.com/developer/overview/fbx-sdk", file=sys.stderr)
+    sys.exit(1)
+
+
+# Unit definitions: name -> (FbxSystemUnit, description)
+UNITS = {
+    'm': (FbxSystemUnit.m, 'meters'),
+    'meters': (FbxSystemUnit.m, 'meters'),
+    'cm': (FbxSystemUnit.cm, 'centimeters'),
+    'centimeters': (FbxSystemUnit.cm, 'centimeters'),
+    'mm': (FbxSystemUnit.mm, 'millimeters'),
+    'millimeters': (FbxSystemUnit.mm, 'millimeters'),
+    'in': (FbxSystemUnit.Inch, 'inches'),
+    'inches': (FbxSystemUnit.Inch, 'inches'),
+    'ft': (FbxSystemUnit.Foot, 'feet'),
+    'feet': (FbxSystemUnit.Foot, 'feet'),
+}
+
+
+def load_fbx_scene(manager, filepath):
+    """Load an FBX scene from file."""
+    scene = FbxScene.Create(manager, "")
+    importer = FbxImporter.Create(manager, "")
+
+    if not importer.Initialize(filepath, -1, manager.GetIOSettings()):
+        print(f"Error: Failed to initialize importer: {importer.GetStatus().GetErrorString()}", file=sys.stderr)
+        importer.Destroy()
+        return None
+
+    if not importer.Import(scene):
+        print(f"Error: Failed to import scene: {importer.GetStatus().GetErrorString()}", file=sys.stderr)
+        importer.Destroy()
+        return None
+
+    importer.Destroy()
+    return scene
+
+
+def save_fbx_scene(manager, scene, filepath):
+    """Save an FBX scene to file."""
+    exporter = FbxExporter.Create(manager, "")
+
+    # Determine file format (binary FBX)
+    file_format = -1
+    if filepath.lower().endswith('.fbx'):
+        # Find binary FBX format
+        for i in range(manager.GetIOPluginRegistry().GetWriterFormatCount()):
+            if manager.GetIOPluginRegistry().WriterIsFBX(i):
+                desc = manager.GetIOPluginRegistry().GetWriterFormatDescription(i)
+                if 'binary' in desc.lower():
+                    file_format = i
+                    break
+
+    if file_format < 0:
+        file_format = manager.GetIOPluginRegistry().GetNativeWriterFormat()
+
+    if not exporter.Initialize(filepath, file_format, manager.GetIOSettings()):
+        print(f"Error: Failed to initialize exporter: {exporter.GetStatus().GetErrorString()}", file=sys.stderr)
+        exporter.Destroy()
+        return False
+
+    success = exporter.Export(scene)
+    exporter.Destroy()
+
+    return success
+
+
+def get_current_unit_info(scene):
+    """Get current unit information from the scene."""
+    global_settings = scene.GetGlobalSettings()
+    system_unit = global_settings.GetSystemUnit()
+
+    scale_factor = system_unit.GetScaleFactor()
+    scale_string = system_unit.GetScaleFactorAsString()
+
+    return scale_factor, scale_string
+
+
+def convert_scene_units(scene, target_unit):
+    """
+    Convert the scene to target units, scaling all geometry and transforms.
+
+    Uses FBX SDK's built-in ConvertScene method which handles:
+    - Vertex positions
+    - Node transforms (translation)
+    - Animation curves (translation keyframes)
+    - Camera and light properties
+    - Other distance-based properties
+    """
+    global_settings = scene.GetGlobalSettings()
+    current_unit = global_settings.GetSystemUnit()
+
+    # Calculate conversion factor for display
+    # ConversionFactorTo gives the multiplier to convert FROM current TO target
+    conversion_factor = current_unit.GetConversionFactorTo(target_unit)
+
+    print(f"Conversion factor: {conversion_factor}")
+
+    # Use FBX SDK's built-in conversion which handles everything properly
+    target_unit.ConvertScene(scene)
+
+    return True
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description='Convert FBX file to different unit scale, transforming all geometry.',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog='''
+Units:
+  m, meters       - Convert to meters
+  cm, centimeters - Convert to centimeters
+  mm, millimeters - Convert to millimeters
+  in, inches      - Convert to inches
+  ft, feet        - Convert to feet
+
+Examples:
+  %(prog)s model.fbx model_meters.fbx m
+  %(prog)s model.fbx model_cm.fbx cm
+
+This tool converts all geometry, transforms, and animations to the target unit.
+'''
+    )
+    parser.add_argument('input', help='Input FBX file path')
+    parser.add_argument('output', help='Output FBX file path')
+    parser.add_argument('unit', help='Target unit (m, cm, mm, in, ft)')
+
+    args = parser.parse_args()
+
+    # Validate unit
+    unit_lower = args.unit.lower()
+    if unit_lower not in UNITS:
+        print(f"Error: Unknown unit '{args.unit}'", file=sys.stderr)
+        print(f"Valid units: {', '.join(sorted(set(UNITS.keys())))}", file=sys.stderr)
+        sys.exit(1)
+
+    target_unit, unit_name = UNITS[unit_lower]
+
+    # Validate input file
+    if not os.path.exists(args.input):
+        print(f"Error: Input file not found: {args.input}", file=sys.stderr)
+        sys.exit(1)
+
+    # Initialize FBX SDK
+    manager = FbxManager.Create()
+    if not manager:
+        print("Error: Failed to create FBX Manager", file=sys.stderr)
+        sys.exit(1)
+
+    ios = FbxIOSettings.Create(manager, IOSROOT)
+    manager.SetIOSettings(ios)
+
+    # Load scene
+    print(f"Loading: {args.input}")
+    scene = load_fbx_scene(manager, args.input)
+    if not scene:
+        manager.Destroy()
+        sys.exit(1)
+
+    # Get current unit info
+    old_scale, old_name = get_current_unit_info(scene)
+    print(f"Current unit: {old_name} (scale factor: {old_scale})")
+    print(f"Target unit: {unit_name}")
+
+    # Convert scene to target units
+    print("Converting scene...")
+    if not convert_scene_units(scene, target_unit):
+        print("Error: Failed to convert units", file=sys.stderr)
+        manager.Destroy()
+        sys.exit(1)
+
+    # Verify the change
+    new_scale, new_name = get_current_unit_info(scene)
+    print(f"New unit: {new_name} (scale factor: {new_scale})")
+
+    # Save scene
+    print(f"Saving: {args.output}")
+    if not save_fbx_scene(manager, scene, args.output):
+        print("Error: Failed to save file", file=sys.stderr)
+        manager.Destroy()
+        sys.exit(1)
+
+    print("Done!")
+    manager.Destroy()
+
+
+if __name__ == '__main__':
+    main()

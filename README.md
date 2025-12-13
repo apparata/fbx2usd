@@ -541,6 +541,71 @@ Hips
 
 ---
 
+# fbxunit
+
+A Python command-line tool for converting an FBX file from one unit system to another, scaling all geometry, transforms, and animations appropriately.
+
+## Purpose
+
+Convert FBX files between different unit systems (e.g., centimeters to meters). The tool uses the FBX SDK's built-in unit conversion which properly scales:
+- Vertex positions
+- Node transforms (translations)
+- Animation curves (translation keyframes)
+- Camera and light properties
+- Other distance-based properties
+
+## Requirements
+
+- Python 3.x
+- Autodesk FBX SDK Python bindings
+
+## Usage
+
+```bash
+python3 fbxunit <input.fbx> <output.fbx> <unit>
+```
+
+### Supported Units
+
+| Unit | Aliases |
+|------|---------|
+| Meters | m, meters |
+| Centimeters | cm, centimeters |
+| Millimeters | mm, millimeters |
+| Inches | in, inches |
+| Feet | ft, feet |
+
+### Examples
+
+Convert from centimeters to meters:
+```bash
+python3 fbxunit model.fbx model_meters.fbx m
+```
+
+Convert from meters to centimeters:
+```bash
+python3 fbxunit model.fbx model_cm.fbx cm
+```
+
+### Output
+
+```
+Loading: model.fbx
+Current unit: cm (scale factor: 1.0)
+Target unit: meters
+Converting scene...
+Conversion factor: 0.01
+New unit: m (scale factor: 100.0)
+Saving: model_meters.fbx
+Done!
+```
+
+## How It Works
+
+The tool uses `FbxSystemUnit.ConvertScene()` from the FBX SDK, which automatically scales all distance-based values in the scene. For example, converting from centimeters to meters applies a 0.01 scale factor to all positions and translations.
+
+---
+
 # append-fbx-skeletal-animation
 
 A Python command-line tool for merging animation takes from one FBX file into another. Useful for combining animations from different sources (e.g., Mixamo) into a single FBX file before converting to USD.
