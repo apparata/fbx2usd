@@ -414,6 +414,133 @@ No FBX SDK required - this tool only reads USD files.
 
 ---
 
+# fbxinspect
+
+A Python command-line tool for inspecting FBX files and displaying scene hierarchy, skeleton structure, animation takes, mesh information, and materials in Markdown format.
+
+## Features
+
+- **Scene Information**: Displays FPS, up axis, coordinate system, and unit scale
+- **Node Summary**: Counts meshes, skeleton bones, materials, and textures
+- **Node Hierarchy**: ASCII tree visualization of the scene graph with node types
+- **Skeleton Hierarchy**: Displays bone/joint hierarchy for skeletal models
+- **Mesh Details**: Shows vertex count, polygon count, UV sets, skinning, and blend shapes
+- **Animation Takes**: Lists all animation stacks with duration, frame count, and FPS
+- **Material Info**: Shows shading models and texture assignments (verbose mode)
+- **Markdown Output**: Formatted output with aligned tables
+- **Marked 2 Integration**: Option to open output directly in Marked 2 for preview
+
+## Requirements
+
+- Python 3.x
+- Autodesk FBX SDK Python bindings
+
+## Usage
+
+### Basic Usage
+
+Inspect an FBX file:
+
+```bash
+python3 fbxinspect model.fbx
+```
+
+### Options
+
+```
+fbxinspect <input_file> [options]
+
+Options:
+  -v, --verbose     Show detailed information (materials, etc.)
+  -m, --marked      Copy output to pasteboard and open in Marked 2
+```
+
+### Examples
+
+Inspect an FBX file:
+```bash
+python3 fbxinspect Character.fbx
+```
+
+Show verbose output with material details:
+```bash
+python3 fbxinspect Character.fbx -v
+```
+
+Open the output in Marked 2 for preview:
+```bash
+python3 fbxinspect Character.fbx -m
+```
+
+## Output Example
+
+```markdown
+# Character.fbx
+
+## Scene Info
+
+| Property          | Value               |
+|-------------------|---------------------|
+| FPS               | 30.0                |
+| Up Axis           | Y                   |
+| Coordinate System | Right-Handed        |
+| Unit Scale        | 1.0 (cm)            |
+
+## Node Summary
+
+| Type           | Count |
+|----------------|-------|
+| Total nodes    | 55    |
+| Meshes         | 1     |
+| Skeleton bones | 50    |
+| Materials      | 2     |
+| Textures       | 4     |
+
+## Node Hierarchy
+
+Armature (Null)
+└── Hips (Skeleton)
+    ├── Spine (Skeleton)
+    │   └── ...
+    └── ...
+Character_Mesh (Mesh)
+
+## Skeleton Hierarchy (50 joints)
+
+**Root:** `Hips`
+
+Hips
+├── Spine
+│   └── Spine1
+│       └── Spine2
+│           ├── Neck
+│           │   └── Head
+│           ├── LeftShoulder
+│           │   └── LeftArm
+│           └── RightShoulder
+│               └── RightArm
+├── LeftUpLeg
+│   └── LeftLeg
+└── RightUpLeg
+    └── RightLeg
+
+## Meshes
+
+| Name           | Vertices | Polygons | UV Sets | Skinned | Blend Shapes |
+|----------------|----------|----------|---------|---------|--------------|
+| Character_Mesh | 5432     | 10234    | 1       | Yes     | -            |
+
+## Animation Takes
+
+| Name  | Duration | Frames | FPS  | Layers |
+|-------|----------|--------|------|--------|
+| Idle  | 2.00s    | 60     | 30.0 | 1      |
+| Walk  | 1.00s    | 30     | 30.0 | 1      |
+| Run   | 0.67s    | 20     | 30.0 | 1      |
+```
+
+---
+
 # append-fbx-skeletal-animation
 
 A Python command-line tool for merging animation takes from one FBX file into another. Useful for combining animations from different sources (e.g., Mixamo) into a single FBX file before converting to USD.

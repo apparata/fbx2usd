@@ -1,0 +1,658 @@
+#!/usr/bin/env python3
+"""
+fbxinspect - FBX file inspection tool
+
+Inspects FBX files and displays scene hierarchy, skeleton structure,
+animation takes, and material information in Markdown format.
+"""
+
+import sys
+import os
+import argparse
+import subprocess
+import io
+
+try:
+    from fbx import *
+except ImportError:
+    print("Error: FBX Python SDK not found.", file=sys.stderr)
+    print("Please install the Autodesk FBX SDK from:", file=sys.stderr)
+    print("https://aps.autodesk.com/developer/overview/fbx-sdk", file=sys.stderr)
+    sys.exit(1)
+
+
+def load_fbx_scene(filepath):
+    """Load an FBX scene from file."""
+    manager = FbxManager.Create()
+    if not manager:
+        return None, None
+
+    ios = FbxIOSettings.Create(manager, IOSROOT)
+    manager.SetIOSettings(ios)
+
+    scene = FbxScene.Create(manager, "")
+    importer = FbxImporter.Create(manager, "")
+
+    if not importer.Initialize(filepath, -1, manager.GetIOSettings()):
+        print(f"Error: Failed to initialize importer: {importer.GetStatus().GetErrorString()}", file=sys.stderr)
+        importer.Destroy()
+        manager.Destroy()
+        return None, None
+
+    if not importer.Import(scene):
+        print(f"Error: Failed to import scene: {importer.GetStatus().GetErrorString()}", file=sys.stderr)
+        importer.Destroy()
+        manager.Destroy()
+        return None, None
+
+    importer.Destroy()
+    return manager, scene
+
+
+def get_scene_info(scene):
+    """Get general info about an FBX scene."""
+    info = {}
+
+    # Get global settings
+    global_settings = scene.GetGlobalSettings()
+
+    # Time mode and FPS
+    time_mode = global_settings.GetTimeMode()
+    info['time_mode'] = time_mode
+    info['fps'] = FbxTime.GetFrameRate(time_mode)
+
+    # Axis system
+    axis_system = global_settings.GetAxisSystem()
+
+    # GetUpVector returns a tuple (axis_enum, sign)
+    up_vector = axis_system.GetUpVector()
+    up_axis_value = up_vector[0]
+
+    # Check against known axis systems to determine up axis
+    if axis_system == FbxAxisSystem.MayaYUp or axis_system == FbxAxisSystem.OpenGL:
+        info['up_axis'] = 'Y'
+    elif axis_system == FbxAxisSystem.MayaZUp or axis_system == FbxAxisSystem.Max:
+        info['up_axis'] = 'Z'
+    else:
+        # Try to determine from up vector value (1=X, 2=Y, 3=Z typically)
+        if up_axis_value == 2:
+            info['up_axis'] = 'Y'
+        elif up_axis_value == 3:
+            info['up_axis'] = 'Z'
+        else:
+            info['up_axis'] = 'Y'  # Default assumption
+
+    # Coordinate system (handedness)
+    coord_system = axis_system.GetCoorSystem()
+    if coord_system == 0:  # Right-handed
+        info['coord_system'] = 'Right-Handed'
+    else:
+        info['coord_system'] = 'Left-Handed'
+
+    # Unit system
+    system_unit = global_settings.GetSystemUnit()
+    info['unit_scale'] = system_unit.GetScaleFactor()
+    info['unit_name'] = system_unit.GetScaleFactorAsString()
+
+    # Scene info
+    scene_info = scene.GetSceneInfo()
+    if scene_info:
+        info['title'] = scene_info.mTitle.Buffer() if scene_info.mTitle else ""
+        info['author'] = scene_info.mAuthor.Buffer() if scene_info.mAuthor else ""
+        info['comment'] = scene_info.mComment.Buffer() if scene_info.mComment else ""
+    else:
+        info['title'] = ""
+        info['author'] = ""
+        info['comment'] = ""
+
+    return info
+
+
+def count_nodes(scene):
+    """Count different types of nodes in the scene."""
+    counts = {
+        'total': 0,
+        'meshes': 0,
+        'skeletons': 0,
+        'cameras': 0,
+        'lights': 0,
+        'nulls': 0,
+        'materials': 0,
+        'textures': 0,
+    }
+
+    root_node = scene.GetRootNode()
+
+    def count_recursive(node):
+        if not node:
+            return
+
+        counts['total'] += 1
+
+        attr = node.GetNodeAttribute()
+        if attr:
+            attr_type = attr.GetAttributeType()
+            if attr_type == FbxNodeAttribute.EType.eMesh:
+                counts['meshes'] += 1
+            elif attr_type == FbxNodeAttribute.EType.eSkeleton:
+                counts['skeletons'] += 1
+            elif attr_type == FbxNodeAttribute.EType.eCamera:
+                counts['cameras'] += 1
+            elif attr_type == FbxNodeAttribute.EType.eLight:
+                counts['lights'] += 1
+            elif attr_type == FbxNodeAttribute.EType.eNull:
+                counts['nulls'] += 1
+
+        for i in range(node.GetChildCount()):
+            count_recursive(node.GetChild(i))
+
+    count_recursive(root_node)
+
+    # Count materials
+    counts['materials'] = scene.GetMaterialCount()
+
+    # Count textures
+    counts['textures'] = scene.GetTextureCount()
+
+    return counts
+
+
+def get_node_type_name(node):
+    """Get a human-readable type name for a node."""
+    attr = node.GetNodeAttribute()
+    if not attr:
+        return "Null"
+
+    attr_type = attr.GetAttributeType()
+    type_names = {
+        FbxNodeAttribute.EType.eUnknown: "Unknown",
+        FbxNodeAttribute.EType.eNull: "Null",
+        FbxNodeAttribute.EType.eMarker: "Marker",
+        FbxNodeAttribute.EType.eSkeleton: "Skeleton",
+        FbxNodeAttribute.EType.eMesh: "Mesh",
+        FbxNodeAttribute.EType.eNurbs: "Nurbs",
+        FbxNodeAttribute.EType.ePatch: "Patch",
+        FbxNodeAttribute.EType.eCamera: "Camera",
+        FbxNodeAttribute.EType.eCameraStereo: "CameraStereo",
+        FbxNodeAttribute.EType.eCameraSwitcher: "CameraSwitcher",
+        FbxNodeAttribute.EType.eLight: "Light",
+        FbxNodeAttribute.EType.eOpticalReference: "OpticalReference",
+        FbxNodeAttribute.EType.eOpticalMarker: "OpticalMarker",
+        FbxNodeAttribute.EType.eNurbsCurve: "NurbsCurve",
+        FbxNodeAttribute.EType.eTrimNurbsSurface: "TrimNurbsSurface",
+        FbxNodeAttribute.EType.eBoundary: "Boundary",
+        FbxNodeAttribute.EType.eNurbsSurface: "NurbsSurface",
+        FbxNodeAttribute.EType.eShape: "Shape",
+        FbxNodeAttribute.EType.eLODGroup: "LODGroup",
+        FbxNodeAttribute.EType.eSubDiv: "SubDiv",
+    }
+    return type_names.get(attr_type, "Unknown")
+
+
+def get_node_tree(scene):
+    """Get node hierarchy as a nested structure."""
+    def build_tree(node):
+        node_type = get_node_type_name(node)
+        tree_node = {
+            'name': node.GetName(),
+            'type': node_type,
+            'children': []
+        }
+
+        for i in range(node.GetChildCount()):
+            tree_node['children'].append(build_tree(node.GetChild(i)))
+
+        return tree_node
+
+    root_node = scene.GetRootNode()
+    root_prims = []
+    for i in range(root_node.GetChildCount()):
+        root_prims.append(build_tree(root_node.GetChild(i)))
+
+    return root_prims
+
+
+def print_node_tree(tree, prefix="", is_last=True, is_root=True):
+    """Print node tree in ASCII art format."""
+    for i, node in enumerate(tree):
+        is_last_node = (i == len(tree) - 1)
+
+        if is_root:
+            connector = ""
+            child_prefix = ""
+        else:
+            connector = "└── " if is_last_node else "├── "
+            child_prefix = "    " if is_last_node else "│   "
+
+        type_str = f" ({node['type']})" if node['type'] else ""
+        print(f"{prefix}{connector}{node['name']}{type_str}")
+
+        if node['children']:
+            print_node_tree(node['children'], prefix + child_prefix, is_last_node, is_root=False)
+
+
+def find_skeleton_roots(scene):
+    """Find skeleton root nodes and build joint hierarchies."""
+    skeletons = []
+    root_node = scene.GetRootNode()
+
+    def find_skeleton_nodes(node, parent_is_skeleton=False):
+        if not node:
+            return
+
+        attr = node.GetNodeAttribute()
+        is_skeleton = False
+        if attr and attr.GetAttributeType() == FbxNodeAttribute.EType.eSkeleton:
+            is_skeleton = True
+
+        # If this is a skeleton node and parent is not, it's a root
+        if is_skeleton and not parent_is_skeleton:
+            skeleton_info = {
+                'name': node.GetName(),
+                'path': node.GetName(),
+                'joints': [],
+                'joint_tree': []
+            }
+            collect_joints(node, skeleton_info['joints'], skeleton_info['joint_tree'])
+            skeletons.append(skeleton_info)
+        elif not is_skeleton:
+            # Continue searching in children
+            for i in range(node.GetChildCount()):
+                find_skeleton_nodes(node.GetChild(i), is_skeleton)
+
+    for i in range(root_node.GetChildCount()):
+        find_skeleton_nodes(root_node.GetChild(i), False)
+
+    return skeletons
+
+
+def collect_joints(node, joints_list, tree_list, path_prefix=""):
+    """Recursively collect joints from a skeleton hierarchy."""
+    attr = node.GetNodeAttribute()
+    if not attr or attr.GetAttributeType() != FbxNodeAttribute.EType.eSkeleton:
+        return
+
+    joint_name = node.GetName()
+    joint_path = f"{path_prefix}/{joint_name}" if path_prefix else joint_name
+    joints_list.append(joint_path)
+
+    tree_node = {
+        'name': joint_name,
+        'path': joint_path,
+        'children': []
+    }
+    tree_list.append(tree_node)
+
+    for i in range(node.GetChildCount()):
+        collect_joints(node.GetChild(i), joints_list, tree_node['children'], joint_path)
+
+
+def print_joint_tree(tree, prefix="", is_last=True, is_root=True):
+    """Print joint tree in ASCII art format."""
+    lines = []
+    for i, node in enumerate(tree):
+        is_last_node = (i == len(tree) - 1)
+
+        if is_root:
+            connector = ""
+            child_prefix = ""
+        else:
+            connector = "└── " if is_last_node else "├── "
+            child_prefix = "    " if is_last_node else "│   "
+
+        lines.append(f"{prefix}{connector}{node['name']}")
+
+        if node['children']:
+            lines.extend(print_joint_tree(node['children'], prefix + child_prefix, is_last_node, is_root=False))
+
+    return lines
+
+
+def get_animation_stacks(scene):
+    """Get information about all animation stacks (takes)."""
+    animations = []
+
+    criteria = FbxCriteria.ObjectType(FbxAnimStack.ClassId)
+    stack_count = scene.GetSrcObjectCount(criteria)
+
+    fps = FbxTime.GetFrameRate(FbxTime.GetGlobalTimeMode())
+
+    for i in range(stack_count):
+        stack = scene.GetSrcObject(criteria, i)
+        if not stack:
+            continue
+
+        time_span = stack.GetLocalTimeSpan()
+        start_time = time_span.GetStart()
+        stop_time = time_span.GetStop()
+
+        start_seconds = start_time.GetSecondDouble()
+        stop_seconds = stop_time.GetSecondDouble()
+        duration = stop_seconds - start_seconds
+
+        start_frame = start_time.GetFrameCount()
+        stop_frame = stop_time.GetFrameCount()
+        frame_count = stop_frame - start_frame + 1
+
+        # Count animated nodes
+        layer_criteria = FbxCriteria.ObjectType(FbxAnimLayer.ClassId)
+        layer_count = stack.GetMemberCount(layer_criteria)
+
+        anim_info = {
+            'name': stack.GetName(),
+            'duration': duration,
+            'start_time': start_seconds,
+            'end_time': stop_seconds,
+            'start_frame': start_frame,
+            'end_frame': stop_frame,
+            'frame_count': frame_count,
+            'fps': fps,
+            'layer_count': layer_count,
+        }
+        animations.append(anim_info)
+
+    return animations
+
+
+def get_mesh_info(scene):
+    """Get information about meshes in the scene."""
+    meshes = []
+    root_node = scene.GetRootNode()
+
+    def find_meshes(node):
+        if not node:
+            return
+
+        attr = node.GetNodeAttribute()
+        if attr and attr.GetAttributeType() == FbxNodeAttribute.EType.eMesh:
+            mesh = node.GetMesh()
+            if mesh:
+                mesh_info = {
+                    'name': node.GetName(),
+                    'vertices': mesh.GetControlPointsCount(),
+                    'polygons': mesh.GetPolygonCount(),
+                    'uv_sets': mesh.GetElementUVCount(),
+                    'materials': node.GetMaterialCount(),
+                }
+
+                # Check for skinning
+                skin_count = mesh.GetDeformerCount(FbxDeformer.EDeformerType.eSkin)
+                if skin_count > 0:
+                    skin = mesh.GetDeformer(0, FbxDeformer.EDeformerType.eSkin)
+                    if skin:
+                        mesh_info['skinned'] = True
+                        mesh_info['cluster_count'] = skin.GetClusterCount()
+                else:
+                    mesh_info['skinned'] = False
+                    mesh_info['cluster_count'] = 0
+
+                # Check for blend shapes
+                blend_shape_count = mesh.GetDeformerCount(FbxDeformer.EDeformerType.eBlendShape)
+                mesh_info['blend_shapes'] = blend_shape_count
+
+                meshes.append(mesh_info)
+
+        for i in range(node.GetChildCount()):
+            find_meshes(node.GetChild(i))
+
+    find_meshes(root_node)
+    return meshes
+
+
+def get_material_info(scene):
+    """Get information about materials in the scene."""
+    materials = []
+
+    for i in range(scene.GetMaterialCount()):
+        material = scene.GetMaterial(i)
+        if not material:
+            continue
+
+        mat_info = {
+            'name': material.GetName(),
+            'shading_model': '',
+            'textures': [],
+        }
+
+        # Get shading model
+        if isinstance(material, FbxSurfacePhong):
+            mat_info['shading_model'] = 'Phong'
+        elif isinstance(material, FbxSurfaceLambert):
+            mat_info['shading_model'] = 'Lambert'
+        else:
+            mat_info['shading_model'] = 'Unknown'
+
+        # Find textures
+        texture_properties = [
+            (FbxSurfaceMaterial.sDiffuse, 'Diffuse'),
+            (FbxSurfaceMaterial.sNormalMap, 'Normal'),
+            (FbxSurfaceMaterial.sSpecular, 'Specular'),
+            (FbxSurfaceMaterial.sEmissive, 'Emissive'),
+            (FbxSurfaceMaterial.sBump, 'Bump'),
+        ]
+
+        for prop_name, tex_type in texture_properties:
+            prop = material.FindProperty(prop_name)
+            if prop.IsValid():
+                tex_count = prop.GetSrcObjectCount()
+                for j in range(tex_count):
+                    tex = prop.GetSrcObject(j)
+                    if isinstance(tex, FbxFileTexture):
+                        mat_info['textures'].append({
+                            'type': tex_type,
+                            'filename': os.path.basename(tex.GetFileName()),
+                        })
+
+        materials.append(mat_info)
+
+    return materials
+
+
+def print_markdown_table(headers, rows):
+    """Print a markdown table with aligned columns."""
+    if not rows:
+        return
+
+    col_widths = [len(h) for h in headers]
+    for row in rows:
+        for i, cell in enumerate(row):
+            col_widths[i] = max(col_widths[i], len(str(cell)))
+
+    header_line = "| " + " | ".join(h.ljust(col_widths[i]) for i, h in enumerate(headers)) + " |"
+    separator = "|" + "|".join("-" * (w + 2) for w in col_widths) + "|"
+    print(header_line)
+    print(separator)
+
+    for row in rows:
+        row_line = "| " + " | ".join(str(cell).ljust(col_widths[i]) for i, cell in enumerate(row)) + " |"
+        print(row_line)
+
+
+def print_default_output(filepath, scene, verbose=False):
+    """Print general overview of the FBX file in Markdown format."""
+    filename = os.path.basename(filepath)
+    info = get_scene_info(scene)
+    counts = count_nodes(scene)
+
+    print(f"# {filename}")
+    print()
+
+    # Scene info
+    print("## Scene Info")
+    print()
+    scene_rows = [
+        ["FPS", info['fps']],
+        ["Up Axis", info['up_axis']],
+        ["Coordinate System", info['coord_system']],
+        ["Unit Scale", f"{info['unit_scale']} ({info['unit_name']})"],
+    ]
+    if info['title']:
+        scene_rows.append(["Title", info['title']])
+    if info['author']:
+        scene_rows.append(["Author", info['author']])
+    print_markdown_table(["Property", "Value"], scene_rows)
+    print()
+
+    # Node summary
+    print("## Node Summary")
+    print()
+    node_rows = [["Total nodes", counts['total']]]
+    if counts['meshes'] > 0:
+        node_rows.append(["Meshes", counts['meshes']])
+    if counts['skeletons'] > 0:
+        node_rows.append(["Skeleton bones", counts['skeletons']])
+    if counts['materials'] > 0:
+        node_rows.append(["Materials", counts['materials']])
+    if counts['textures'] > 0:
+        node_rows.append(["Textures", counts['textures']])
+    if counts['cameras'] > 0 and verbose:
+        node_rows.append(["Cameras", counts['cameras']])
+    if counts['lights'] > 0 and verbose:
+        node_rows.append(["Lights", counts['lights']])
+    print_markdown_table(["Type", "Count"], node_rows)
+    print()
+
+    # Node hierarchy
+    print("## Node Hierarchy")
+    print()
+    print("```")
+    node_tree = get_node_tree(scene)
+    print_node_tree(node_tree)
+    print("```")
+    print()
+
+    # Skeleton hierarchy
+    skeletons = find_skeleton_roots(scene)
+    if skeletons:
+        for skel in skeletons:
+            joint_count = len(skel['joints'])
+            print(f"## Skeleton Hierarchy ({joint_count} joints)")
+            print()
+            print(f"**Root:** `{skel['name']}`")
+            print()
+            if skel['joint_tree']:
+                print("```")
+                for line in print_joint_tree(skel['joint_tree']):
+                    print(line)
+                print("```")
+                print()
+
+    # Mesh info
+    meshes = get_mesh_info(scene)
+    if meshes:
+        print("## Meshes")
+        print()
+        mesh_rows = []
+        for mesh in meshes:
+            skinned = "Yes" if mesh['skinned'] else "No"
+            blend_shapes = str(mesh['blend_shapes']) if mesh['blend_shapes'] > 0 else "-"
+            mesh_rows.append([
+                mesh['name'],
+                mesh['vertices'],
+                mesh['polygons'],
+                mesh['uv_sets'],
+                skinned,
+                blend_shapes,
+            ])
+        print_markdown_table(["Name", "Vertices", "Polygons", "UV Sets", "Skinned", "Blend Shapes"], mesh_rows)
+        print()
+
+    # Animation stacks
+    animations = get_animation_stacks(scene)
+    if animations:
+        print("## Animation Takes")
+        print()
+        anim_rows = []
+        for anim in animations:
+            duration = f"{anim['duration']:.2f}s" if anim['duration'] > 0 else "-"
+            frames = str(anim['frame_count']) if anim['frame_count'] > 0 else "-"
+            fps = str(anim['fps']) if anim['fps'] > 0 else "-"
+            anim_rows.append([
+                anim['name'],
+                duration,
+                frames,
+                fps,
+                anim['layer_count'],
+            ])
+        print_markdown_table(["Name", "Duration", "Frames", "FPS", "Layers"], anim_rows)
+        print()
+
+    # Materials
+    materials = get_material_info(scene)
+    if materials and verbose:
+        print("## Materials")
+        print()
+        for mat in materials:
+            print(f"### {mat['name']}")
+            print()
+            print(f"**Shading Model:** {mat['shading_model']}")
+            print()
+            if mat['textures']:
+                print("**Textures:**")
+                print()
+                for tex in mat['textures']:
+                    print(f"- {tex['type']}: `{tex['filename']}`")
+                print()
+
+    if not animations and not skeletons:
+        print("*No animations or skeleton found.*")
+        print()
+
+
+def copy_to_pasteboard(text):
+    """Copy text to macOS pasteboard using pbcopy."""
+    process = subprocess.Popen(['pbcopy'], stdin=subprocess.PIPE)
+    process.communicate(text.encode('utf-8'))
+
+
+def open_in_marked():
+    """Open Marked 2 with pasteboard content."""
+    subprocess.run(['open', 'x-marked://paste'])
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description='Inspect FBX files for scene hierarchy, skeletons, and animations.',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog='''
+Examples:
+  fbxinspect model.fbx                # Inspect FBX file
+  fbxinspect model.fbx -v             # Show verbose output (materials)
+  fbxinspect model.fbx -m             # Open output in Marked 2
+'''
+    )
+    parser.add_argument('input', help='Input FBX file path')
+    parser.add_argument('-v', '--verbose', action='store_true',
+                        help='Show detailed information (materials, etc.)')
+    parser.add_argument('-m', '--marked', action='store_true',
+                        help='Copy output to pasteboard and open in Marked 2')
+
+    args = parser.parse_args()
+
+    if not os.path.exists(args.input):
+        print(f"Error: File not found: {args.input}", file=sys.stderr)
+        sys.exit(1)
+
+    manager, scene = load_fbx_scene(args.input)
+    if not scene:
+        sys.exit(1)
+
+    try:
+        if args.marked:
+            old_stdout = sys.stdout
+            sys.stdout = io.StringIO()
+            print_default_output(args.input, scene, verbose=args.verbose)
+            output = sys.stdout.getvalue()
+            sys.stdout = old_stdout
+
+            copy_to_pasteboard(output)
+            open_in_marked()
+            print("Output copied to pasteboard and opened in Marked 2")
+        else:
+            print_default_output(args.input, scene, verbose=args.verbose)
+    finally:
+        manager.Destroy()
+
+
+if __name__ == '__main__':
+    main()
