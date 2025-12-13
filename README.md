@@ -277,6 +277,7 @@ A Python command-line tool for inspecting USD files (usda/usdc/usdz) and display
 - **Stage Information**: Displays format, FPS, time range, up axis, and meters per unit
 - **Prim Summary**: Counts meshes, materials, skeletons, and other prim types
 - **Prim Hierarchy**: ASCII tree visualization of the scene graph
+- **Skeleton Hierarchy**: Displays bone/joint hierarchy for skeletal models
 - **RealityKit Animation Libraries**: Lists animation names and source files
 - **Skeletal Animations**: Shows duration, frame count, FPS, joint count, and animation channels
 - **Reference Following**: Recursively inspects referenced USD files (enabled by default)
@@ -357,6 +358,33 @@ Character (Xform)
 └── AnimationLibrary (RealityKitComponent)
     ├── Idle (RealityKitAnimationFile)
     └── Walk (RealityKitAnimationFile)
+
+## Skeleton Hierarchy (50 joints)
+
+**Path:** `/Character/Root/Skeleton`
+
+Hips
+├── Spine
+│   ├── Spine1
+│   │   └── Spine2
+│   │       ├── Neck
+│   │       │   └── Head
+│   │       ├── LeftShoulder
+│   │       │   └── LeftArm
+│   │       │       └── LeftForeArm
+│   │       │           └── LeftHand
+│   │       └── RightShoulder
+│   │           └── RightArm
+│   │               └── RightForeArm
+│   │                   └── RightHand
+├── LeftUpLeg
+│   └── LeftLeg
+│       └── LeftFoot
+│           └── LeftToeBase
+└── RightUpLeg
+    └── RightLeg
+        └── RightFoot
+            └── RightToeBase
 
 ## RealityKit Animation Library
 

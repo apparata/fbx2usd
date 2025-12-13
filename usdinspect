@@ -134,6 +134,91 @@ def find_skel_animations(stage, source_file):
     return animations
 
 
+def find_skeletons(stage):
+    """Find all Skeleton prims and extract their joint hierarchy"""
+    skeletons = []
+
+    for prim in stage.Traverse():
+        if prim.GetTypeName() == 'Skeleton':
+            skel = UsdSkel.Skeleton(prim)
+            if not skel:
+                continue
+
+            skel_info = {
+                'path': str(prim.GetPath()),
+                'joints': [],
+                'joint_tree': [],
+            }
+
+            # Get joint paths
+            joints_attr = skel.GetJointsAttr()
+            joint_paths = joints_attr.Get() if joints_attr else []
+
+            if joint_paths:
+                skel_info['joints'] = [str(j) for j in joint_paths]
+                skel_info['joint_tree'] = build_joint_tree(joint_paths)
+
+            skeletons.append(skel_info)
+
+    return skeletons
+
+
+def build_joint_tree(joint_paths):
+    """Build a hierarchical tree structure from flat joint paths"""
+    # joint_paths are like: ["Root", "Root/Hips", "Root/Hips/Spine", ...]
+    # Build a tree structure from these paths
+
+    root_nodes = []
+    nodes_by_path = {}
+
+    for joint_path in joint_paths:
+        path_str = str(joint_path)
+        parts = path_str.split('/')
+        joint_name = parts[-1]
+
+        node = {
+            'name': joint_name,
+            'path': path_str,
+            'children': []
+        }
+        nodes_by_path[path_str] = node
+
+        # Find parent
+        if len(parts) > 1:
+            parent_path = '/'.join(parts[:-1])
+            if parent_path in nodes_by_path:
+                nodes_by_path[parent_path]['children'].append(node)
+            else:
+                # Parent not found, treat as root
+                root_nodes.append(node)
+        else:
+            # No parent, this is a root joint
+            root_nodes.append(node)
+
+    return root_nodes
+
+
+def print_joint_tree(tree, prefix="", is_last=True, is_root=True):
+    """Print joint tree in ASCII art format"""
+    lines = []
+    for i, node in enumerate(tree):
+        is_last_node = (i == len(tree) - 1)
+
+        if is_root:
+            connector = ""
+            child_prefix = ""
+        else:
+            connector = "└── " if is_last_node else "├── "
+            child_prefix = "    " if is_last_node else "│   "
+
+        lines.append(f"{prefix}{connector}{node['name']}")
+
+        if node['children']:
+            lines.extend(print_joint_tree(node['children'], prefix + child_prefix, is_last_node, is_root=False))
+
+    return lines
+
+
 def find_realitykit_animation_libraries(stage):
     """Find RealityKit AnimationLibrary components"""
     libraries = []
@@ -261,6 +346,7 @@ def inspect_file(filepath, recursive=True, visited=None):
         'prim_tree': get_prim_tree(stage),
         'animation_libraries': find_realitykit_animation_libraries(stage),
         'skel_animations': find_skel_animations(stage, filename),
+        'skeletons': find_skeletons(stage),
         'references': [],
         'referenced_results': [],
     }
@@ -297,6 +383,16 @@ def collect_all_libraries(result):
         libraries.extend(collect_all_libraries(ref_result))
 
     return libraries
+
+
+def collect_all_skeletons(result):
+    """Collect all skeletons from result and referenced results"""
+    skeletons = list(result.get('skeletons', []))
+
+    for ref_result in result.get('referenced_results', []):
+        skeletons.extend(collect_all_skeletons(ref_result))
+
+    return skeletons
 
 
 def count_referenced_files(result):
@@ -421,6 +517,22 @@ def print_default_output(result, verbose=False):
         for ref in result['references']:
             print(f"- `{ref}`")
         print()
+
+    # Skeleton hierarchy
+    all_skeletons = collect_all_skeletons(result)
+    if all_skeletons:
+        for skel in all_skeletons:
+            joint_count = len(skel['joints'])
+            print(f"## Skeleton Hierarchy ({joint_count} joints)")
+            print()
+            print(f"**Path:** `{skel['path']}`")
+            print()
+            if skel['joint_tree']:
+                print("```")
+                for line in print_joint_tree(skel['joint_tree']):
+                    print(line)
+                print("```")
+                print()
 
     # Animation libraries and details
     all_libraries = collect_all_libraries(result)
