@@ -1,0 +1,1006 @@
+#!/usr/bin/env python3
+"""
+FBX Animation Merge Script
+
+Merges animation takes (animation stacks) from a source FBX file into a
+destination FBX file that contains the same skeleton, and saves the result
+to a new FBX file.
+
+Requirements:
+    - Python 3.x
+    - Autodesk FBX Python SDK (install from Autodesk website)
+    - Both FBX files must have identical skeleton hierarchies
+
+Usage:
+    python3 append-fbx-skeletal-animation <model_with_anims.fbx> <anims_to_add.fbx> <output.fbx> [--scale FACTOR]
+
+Options:
+    --scale FACTOR    Scale factor for the animation file translations (default: 1.0)
+                      Use 0.01 if animation is 100x too big, or 100 if 100x too small
+
+Example:
+    python3 append-fbx-skeletal-animation character_base.fbx additional_anims.fbx character_merged.fbx
+    python3 append-fbx-skeletal-animation character_base.fbx additional_anims.fbx character_merged.fbx --scale 0.01
+"""
+
+import sys
+import os
+import math
+
+# Check Python version
+if sys.version_info[0] < 3:
+    print("Error: This script requires Python 3.x")
+    sys.exit(1)
+
+try:
+    from fbx import *
+    # Try to import FbxCommon from the SDK samples directory
+    try:
+        import FbxCommon
+    except ImportError:
+        # FbxCommon might not be in path, provide fallback functions
+        FbxCommon = None
+except ImportError:
+    print("Error: FBX Python SDK not found.")
+    print("Please install the Autodesk FBX SDK from:")
+    print("https://aps.autodesk.com/developer/overview/fbx-sdk")
+    print("")
+    print("For Python 3, you need FBX SDK 2020.0 or later.")
+    print("After installing, ensure the Python bindings are in your PYTHONPATH:")
+    print("  export PYTHONPATH=/path/to/fbx/sdk/lib/Python3x_x64:$PYTHONPATH")
+    sys.exit(1)
+
+
+# Fallback implementations if FbxCommon is not available
+def InitializeSdkObjects():
+    """Initialize FBX SDK manager and scene."""
+    manager = FbxManager.Create()
+    if not manager:
+        raise Exception("Failed to create FBX Manager")
+
+    # Create IOSettings
+    ios = FbxIOSettings.Create(manager, IOSROOT)
+    manager.SetIOSettings(ios)
+
+    # Create scene
+    scene = FbxScene.Create(manager, "")
+
+    return manager, scene
+
+
+def LoadScene(manager, scene, filename):
+    """Load an FBX scene from file."""
+    importer = FbxImporter.Create(manager, "")
+
+    # Initialize importer with file
+    if not importer.Initialize(filename, -1, manager.GetIOSettings()):
+        print(f"Failed to initialize importer: {importer.GetStatus().GetErrorString()}")
+        importer.Destroy()
+        return False
+
+    # Import the scene
+    success = importer.Import(scene)
+    importer.Destroy()
+
+    return success
+
+
+def SaveScene(manager, scene, filename, file_format=-1):
+    """Save an FBX scene to file."""
+    exporter = FbxExporter.Create(manager, "")
+
+    # Auto-detect format if not specified
+    if file_format < 0:
+        file_format = manager.GetIOPluginRegistry().GetNativeWriterFormat()
+
+        # Try to use binary format for .fbx files
+        if filename.lower().endswith('.fbx'):
+            # Find the binary FBX format
+            for i in range(manager.GetIOPluginRegistry().GetWriterFormatCount()):
+                if manager.GetIOPluginRegistry().WriterIsFBX(i):
+                    desc = manager.GetIOPluginRegistry().GetWriterFormatDescription(i)
+                    if 'binary' in desc.lower():
+                        file_format = i
+                        break
+
+    # Initialize exporter
+    if not exporter.Initialize(filename, file_format, manager.GetIOSettings()):
+        print(f"Failed to initialize exporter: {exporter.GetStatus().GetErrorString()}")
+        exporter.Destroy()
+        return False
+
+    # Export the scene
+    success = exporter.Export(scene)
+    exporter.Destroy()
+
+    return success
+
+
+def get_all_nodes(root_node):
+    """Recursively get all nodes in the scene hierarchy."""
+    nodes = []
+
+    def recurse(node):
+        if node:
+            nodes.append(node)
+            for i in range(node.GetChildCount()):
+                recurse(node.GetChild(i))
+
+    recurse(root_node)
+    return nodes
+
+
+def find_node_by_name(root_node, name):
+    """Find a node by name in the hierarchy."""
+    nodes = get_all_nodes(root_node)
+    for node in nodes:
+        if node.GetName() == name:
+            return node
+    return None
+
+
+def get_animated_properties(node, anim_layer):
+    """Get a list of animated properties for a node on a given layer."""
+    animated_props = []
+
+    # Check transform properties
+    transform_props = [
+        ('LclTranslation', node.LclTranslation),
+        ('LclRotation', node.LclRotation),
+        ('LclScaling', node.LclScaling),
+    ]
+
+    for prop_name, prop in transform_props:
+        if prop.IsValid():
+            curve_node = prop.GetCurveNode(anim_layer)
+            if curve_node:
+                animated_props.append((prop_name, prop, curve_node))
+
+    return animated_props
+
+
+def find_skeleton_root(scene):
+    """Find the root node of the skeleton hierarchy."""
+    root_node = scene.GetRootNode()
+
+    # Look for common skeleton root patterns
+    for i in range(root_node.GetChildCount()):
+        child = root_node.GetChild(i)
+        name = child.GetName().lower()
+
+        # Check for skeleton attribute
+        attr = child.GetNodeAttribute()
+        if attr:
+            attr_type = attr.GetAttributeType()
+            if attr_type == FbxNodeAttribute.EType.eSkeleton:
+                return child
+
+        # Check for armature/rig naming (Blender exports)
+        if 'armature' in name or 'rig' in name:
+            return child
+
+    # Fallback: return first child that has skeleton children
+    for i in range(root_node.GetChildCount()):
+        child = root_node.GetChild(i)
+        for j in range(child.GetChildCount()):
+            grandchild = child.GetChild(j)
+            attr = grandchild.GetNodeAttribute()
+            if attr and attr.GetAttributeType() == FbxNodeAttribute.EType.eSkeleton:
+                return child
+
+    return None
+
+
+def get_armature_rotation_offset(src_scene, dst_scene):
+    """
+    Calculate the rotation offset between source and destination armatures.
+    Returns (rx, ry, rz) offset in degrees to apply to root animations.
+    """
+    src_armature = find_skeleton_root(src_scene)
+    dst_armature = find_skeleton_root(dst_scene)
+
+    if not src_armature or not dst_armature:
+        return (0.0, 0.0, 0.0)
+
+    # Get local rotations
+    src_rot = src_armature.LclRotation.Get()
+    dst_rot = dst_armature.LclRotation.Get()
+
+    # Also check PreRotation
+    src_pre = src_armature.PreRotation.Get()
+    dst_pre = dst_armature.PreRotation.Get()
+
+    # Calculate total rotation difference
+    # The offset is what we need to subtract from source to match destination
+    offset_x = (src_rot[0] + src_pre[0]) - (dst_rot[0] + dst_pre[0])
+    offset_y = (src_rot[1] + src_pre[1]) - (dst_rot[1] + dst_pre[1])
+    offset_z = (src_rot[2] + src_pre[2]) - (dst_rot[2] + dst_pre[2])
+
+    # Normalize to -180 to 180 range
+    def normalize_angle(a):
+        while a > 180:
+            a -= 360
+        while a < -180:
+            a += 360
+        return a
+
+    offset = (normalize_angle(offset_x), normalize_angle(offset_y), normalize_angle(offset_z))
+
+    if abs(offset[0]) > 0.1 or abs(offset[1]) > 0.1 or abs(offset[2]) > 0.1:
+        print(f"    Detected armature rotation offset: ({offset[0]:.1f}, {offset[1]:.1f}, {offset[2]:.1f})")
+        print(f"      Source armature '{src_armature.GetName()}': rot=({src_rot[0]:.1f}, {src_rot[1]:.1f}, {src_rot[2]:.1f})")
+        print(f"      Dest armature '{dst_armature.GetName()}': rot=({dst_rot[0]:.1f}, {dst_rot[1]:.1f}, {dst_rot[2]:.1f})")
+
+    return offset
+
+
+def get_bone_mapping(src_scene, dst_scene):
+    """
+    Build a mapping of source bone names to destination bone names.
+    Also identifies which bones need rotation compensation.
+    Returns dict: {src_name: (dst_name, needs_root_compensation)}
+    """
+    src_root = src_scene.GetRootNode()
+    dst_root = dst_scene.GetRootNode()
+
+    src_nodes = get_all_nodes(src_root)
+    dst_nodes = get_all_nodes(dst_root)
+
+    dst_names = {node.GetName(): node for node in dst_nodes}
+
+    mapping = {}
+
+    for src_node in src_nodes:
+        src_name = src_node.GetName()
+
+        # Direct match
+        if src_name in dst_names:
+            # Check if this is a root-level bone (child of armature)
+            parent = src_node.GetParent()
+            is_root_bone = False
+            if parent:
+                parent_name = parent.GetName().lower()
+                if 'armature' in parent_name or 'rig' in parent_name or parent == src_root:
+                    is_root_bone = True
+
+            mapping[src_name] = (src_name, is_root_bone)
+            continue
+
+        # Try without namespace prefix (e.g., "mixamorig:Hips" -> "Hips")
+        if ':' in src_name:
+            short_name = src_name.split(':')[-1]
+            if short_name in dst_names:
+                mapping[src_name] = (short_name, False)
+                continue
+
+    return mapping
+
+
+def get_skeleton_scale(scene):
+    """
+    Estimate the scale of a skeleton by finding the hips/pelvis height.
+    Returns the Y position of the hips bone, or None if not found.
+    """
+    root_node = scene.GetRootNode()
+
+    def find_node(node, names):
+        for i in range(node.GetChildCount()):
+            child = node.GetChild(i)
+            child_name = child.GetName().lower()
+            for name in names:
+                if name in child_name:
+                    return child
+            result = find_node(child, names)
+            if result:
+                return result
+        return None
+
+    # Look for hips/pelvis bone
+    hips = find_node(root_node, ['hips', 'pelvis'])
+    if hips:
+        trans = hips.LclTranslation.Get()
+        # Return the vertical component (Y for Y-up, Z for Z-up)
+        # Check which is larger to handle both coordinate systems
+        return max(abs(trans[1]), abs(trans[2]))
+
+    return None
+
+
+def calculate_auto_scale(src_scene, dst_scene):
+    """
+    Calculate the scale factor needed to match source skeleton to destination skeleton.
+    Returns scale factor, or 1.0 if unable to determine.
+    """
+    src_height = get_skeleton_scale(src_scene)
+    dst_height = get_skeleton_scale(dst_scene)
+
+    if src_height and dst_height and src_height > 0:
+        scale = dst_height / src_height
+        # Only apply if there's a significant difference (more than 2x)
+        if scale < 0.5 or scale > 2.0:
+            return scale
+
+    return 1.0
+
+
+def get_cubic_interpolation_type():
+    """Get the cubic interpolation constant (handles API differences)."""
+    # Try different naming conventions across FBX SDK versions
+    if hasattr(FbxAnimCurveDef, 'eInterpolationCubic'):
+        return FbxAnimCurveDef.eInterpolationCubic
+    elif hasattr(FbxAnimCurveDef, 'EInterpolationType'):
+        # Python 3 bindings use enum class
+        return FbxAnimCurveDef.EInterpolationType.eInterpolationCubic
+    else:
+        # Fallback: cubic is typically value 2
+        return 2
+
+
+def copy_anim_curve(src_curve, dst_curve):
+    """Copy all keyframes from source curve to destination curve."""
+    if not src_curve or not dst_curve:
+        return
+
+    key_count = src_curve.KeyGetCount()
+    if key_count == 0:
+        return
+
+    cubic_interp = get_cubic_interpolation_type()
+
+    dst_curve.KeyModifyBegin()
+
+    for i in range(key_count):
+        time = src_curve.KeyGetTime(i)
+        value = src_curve.KeyGetValue(i)
+        interpolation = src_curve.KeyGetInterpolation(i)
+
+        key_index = dst_curve.KeyAdd(time)[0]
+        dst_curve.KeySetValue(key_index, value)
+        dst_curve.KeySetInterpolation(key_index, interpolation)
+
+        # Copy tangent data for cubic interpolation
+        try:
+            # Compare interpolation types (handle both enum and int)
+            is_cubic = (interpolation == cubic_interp or
+                       getattr(interpolation, 'value', interpolation) == getattr(cubic_interp, 'value', cubic_interp))
+
+            if is_cubic:
+                # Get tangent mode
+                tangent_mode = src_curve.KeyGetTangentMode(i)
+                dst_curve.KeySetTangentMode(key_index, tangent_mode)
+
+                # Copy tangent weights and velocities if available
+                try:
+                    left_tangent = src_curve.KeyGetLeftDerivative(i)
+                    right_tangent = src_curve.KeyGetRightDerivative(i)
+                    dst_curve.KeySetLeftDerivative(key_index, left_tangent)
+                    dst_curve.KeySetRightDerivative(key_index, right_tangent)
+                except Exception:
+                    pass  # Some tangent operations may not be available
+        except Exception:
+            pass  # Skip tangent copying if there are any issues
+
+    dst_curve.KeyModifyEnd()
+
+
+def copy_curve_node_data(src_curve_node, dst_curve_node, src_layer, dst_layer, value_offsets=None, scale=1.0):
+    """
+    Copy animation data from source curve node to destination curve node.
+
+    Args:
+        src_curve_node: Source animation curve node
+        dst_curve_node: Destination animation curve node
+        src_layer: Source animation layer
+        dst_layer: Destination animation layer
+        value_offsets: Optional tuple of offsets to add to each channel (e.g., (ox, oy, oz))
+        scale: Scale factor to apply to values (for translation curves)
+    """
+    if not src_curve_node or not dst_curve_node:
+        return
+
+    # Get channel count (typically 3 for XYZ)
+    channel_count = src_curve_node.GetChannelsCount()
+
+    for channel_idx in range(channel_count):
+        # Get the curve for this channel
+        src_curve = src_curve_node.GetCurve(channel_idx)
+        if src_curve and src_curve.KeyGetCount() > 0:
+            # Create or get destination curve
+            dst_curve = dst_curve_node.GetCurve(channel_idx)
+            if not dst_curve:
+                dst_curve = dst_curve_node.CreateCurve(dst_curve_node.GetName(), channel_idx)
+
+            if dst_curve:
+                # Get offset for this channel if provided
+                offset = value_offsets[channel_idx] if value_offsets and channel_idx < len(value_offsets) else 0.0
+                copy_anim_curve_with_offset(src_curve, dst_curve, offset, scale)
+
+
+def copy_anim_curve_with_offset(src_curve, dst_curve, offset=0.0, scale=1.0):
+    """Copy all keyframes from source curve to destination curve, with optional offset and scale."""
+    if not src_curve or not dst_curve:
+        return
+
+    key_count = src_curve.KeyGetCount()
+    if key_count == 0:
+        return
+
+    cubic_interp = get_cubic_interpolation_type()
+
+    dst_curve.KeyModifyBegin()
+
+    for i in range(key_count):
+        time = src_curve.KeyGetTime(i)
+        value = (src_curve.KeyGetValue(i) - offset) * scale  # Apply offset and scale
+        interpolation = src_curve.KeyGetInterpolation(i)
+
+        key_index = dst_curve.KeyAdd(time)[0]
+        dst_curve.KeySetValue(key_index, value)
+        dst_curve.KeySetInterpolation(key_index, interpolation)
+
+        # Copy tangent data for cubic interpolation
+        try:
+            is_cubic = (interpolation == cubic_interp or
+                       getattr(interpolation, 'value', interpolation) == getattr(cubic_interp, 'value', cubic_interp))
+
+            if is_cubic:
+                tangent_mode = src_curve.KeyGetTangentMode(i)
+                dst_curve.KeySetTangentMode(key_index, tangent_mode)
+
+                try:
+                    left_tangent = src_curve.KeyGetLeftDerivative(i) * scale
+                    right_tangent = src_curve.KeyGetRightDerivative(i) * scale
+                    dst_curve.KeySetLeftDerivative(key_index, left_tangent)
+                    dst_curve.KeySetRightDerivative(key_index, right_tangent)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    dst_curve.KeyModifyEnd()
+
+
+def normalize_angle(angle):
+    """Normalize angle to 0-360 range."""
+    while angle < 0:
+        angle += 360
+    while angle >= 360:
+        angle -= 360
+    return angle
+
+
+def copy_curve_node_data_with_rotation_bake(src_curve_node, dst_curve_node, src_layer, dst_layer, pre_rotation):
+    """
+    Copy rotation animation curves while baking in PreRotation offset.
+    Also normalizes angles to 0-360 range.
+
+    Args:
+        src_curve_node: Source animation curve node
+        dst_curve_node: Destination animation curve node
+        src_layer: Source animation layer
+        dst_layer: Destination animation layer
+        pre_rotation: (rx, ry, rz) PreRotation to bake into animation
+    """
+    if not src_curve_node or not dst_curve_node:
+        return
+
+    channel_count = src_curve_node.GetChannelsCount()
+    cubic_interp = get_cubic_interpolation_type()
+
+    for channel_idx in range(channel_count):
+        src_curve = src_curve_node.GetCurve(channel_idx)
+        if not src_curve or src_curve.KeyGetCount() == 0:
+            continue
+
+        dst_curve = dst_curve_node.GetCurve(channel_idx)
+        if not dst_curve:
+            dst_curve = dst_curve_node.CreateCurve(dst_curve_node.GetName(), channel_idx)
+
+        if not dst_curve:
+            continue
+
+        # Get the PreRotation offset for this channel
+        pre_rot_val = pre_rotation[channel_idx] if channel_idx < len(pre_rotation) else 0.0
+
+        dst_curve.KeyModifyBegin()
+
+        for i in range(src_curve.KeyGetCount()):
+            time = src_curve.KeyGetTime(i)
+            # Add PreRotation and normalize to 0-360
+            value = normalize_angle(src_curve.KeyGetValue(i) + pre_rot_val)
+            interpolation = src_curve.KeyGetInterpolation(i)
+
+            key_index = dst_curve.KeyAdd(time)[0]
+            dst_curve.KeySetValue(key_index, value)
+            dst_curve.KeySetInterpolation(key_index, interpolation)
+
+            # Copy tangent data
+            try:
+                is_cubic = (interpolation == cubic_interp or
+                           getattr(interpolation, 'value', interpolation) == getattr(cubic_interp, 'value', cubic_interp))
+                if is_cubic:
+                    tangent_mode = src_curve.KeyGetTangentMode(i)
+                    dst_curve.KeySetTangentMode(key_index, tangent_mode)
+                    try:
+                        dst_curve.KeySetLeftDerivative(key_index, src_curve.KeyGetLeftDerivative(i))
+                        dst_curve.KeySetRightDerivative(key_index, src_curve.KeyGetRightDerivative(i))
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+        dst_curve.KeyModifyEnd()
+
+
+def copy_curve_node_data_with_axis_swap(src_curve_node, dst_curve_node, src_layer, dst_layer, swap_yz=False, scale=1.0):
+    """
+    Copy animation curves with axis transformation for coordinate system conversion.
+
+    For Z-up to Y-up conversion (swap_yz=True):
+    - X stays as X
+    - Y becomes Z
+    - Z becomes -Y (negated)
+    """
+    if not src_curve_node or not dst_curve_node:
+        return
+
+    src_channel_count = src_curve_node.GetChannelsCount()
+    if src_channel_count < 3:
+        # Not a 3-channel property, just copy normally
+        copy_curve_node_data(src_curve_node, dst_curve_node, src_layer, dst_layer, scale=scale)
+        return
+
+    # Get source curves
+    src_curves = []
+    for i in range(3):
+        src_curves.append(src_curve_node.GetCurve(i))
+
+    # Get/create destination curves
+    dst_curves = []
+    for i in range(3):
+        dst_curve = dst_curve_node.GetCurve(i)
+        if not dst_curve:
+            dst_curve = dst_curve_node.CreateCurve(dst_curve_node.GetName(), i)
+        dst_curves.append(dst_curve)
+
+    if swap_yz:
+        # Z-up to Y-up: (X, Y, Z) -> (X, Z, -Y)
+        # Channel 0 (X) -> Channel 0 (X): no change
+        if src_curves[0] and dst_curves[0]:
+            copy_anim_curve_with_offset(src_curves[0], dst_curves[0], 0.0, scale)
+
+        # Channel 1 (Y) -> Channel 2 (Z): copy Y to Z
+        if src_curves[1] and dst_curves[2]:
+            copy_anim_curve_with_offset(src_curves[1], dst_curves[2], 0.0, scale)
+
+        # Channel 2 (Z) -> Channel 1 (Y): copy Z to Y, negated
+        if src_curves[2] and dst_curves[1]:
+            copy_anim_curve_negated(src_curves[2], dst_curves[1], scale)
+    else:
+        # Normal copy
+        for i in range(3):
+            if src_curves[i] and dst_curves[i]:
+                copy_anim_curve_with_offset(src_curves[i], dst_curves[i], 0.0, scale)
+
+
+def copy_anim_curve_negated(src_curve, dst_curve, scale=1.0):
+    """Copy animation curve with all values negated and optionally scaled."""
+    if not src_curve or not dst_curve:
+        return
+
+    key_count = src_curve.KeyGetCount()
+    if key_count == 0:
+        return
+
+    cubic_interp = get_cubic_interpolation_type()
+
+    dst_curve.KeyModifyBegin()
+
+    for i in range(key_count):
+        time = src_curve.KeyGetTime(i)
+        value = -src_curve.KeyGetValue(i) * scale  # Negate and scale value
+        interpolation = src_curve.KeyGetInterpolation(i)
+
+        key_index = dst_curve.KeyAdd(time)[0]
+        dst_curve.KeySetValue(key_index, value)
+        dst_curve.KeySetInterpolation(key_index, interpolation)
+
+        try:
+            is_cubic = (interpolation == cubic_interp or
+                       getattr(interpolation, 'value', interpolation) == getattr(cubic_interp, 'value', cubic_interp))
+
+            if is_cubic:
+                tangent_mode = src_curve.KeyGetTangentMode(i)
+                dst_curve.KeySetTangentMode(key_index, tangent_mode)
+
+                try:
+                    # Negate and scale tangents too
+                    left_tangent = -src_curve.KeyGetLeftDerivative(i) * scale
+                    right_tangent = -src_curve.KeyGetRightDerivative(i) * scale
+                    dst_curve.KeySetLeftDerivative(key_index, left_tangent)
+                    dst_curve.KeySetRightDerivative(key_index, right_tangent)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    dst_curve.KeyModifyEnd()
+
+
+def get_anim_layer_criteria():
+    """Get the criteria for FbxAnimLayer objects (handles API differences)."""
+    try:
+        return FbxCriteria.ObjectType(FbxAnimLayer.ClassId)
+    except AttributeError:
+        # Older API versions
+        return FbxAnimLayer.ClassId
+
+
+def get_anim_stack_criteria():
+    """Get the criteria for FbxAnimStack objects (handles API differences)."""
+    try:
+        return FbxCriteria.ObjectType(FbxAnimStack.ClassId)
+    except AttributeError:
+        # Older API versions
+        return FbxAnimStack.ClassId
+
+
+def copy_animation_stack(src_scene, src_stack, dst_scene, dst_root, root_rotation_offset=None, scale=1.0):
+    """
+    Copy an animation stack from source scene to destination scene.
+
+    Args:
+        src_scene: Source FbxScene
+        src_stack: Source FbxAnimStack to copy
+        dst_scene: Destination FbxScene
+        dst_root: Root node of destination scene
+        root_rotation_offset: Optional (rx, ry, rz) tuple in degrees to compensate for
+                             armature rotation differences (e.g., Z-up vs Y-up)
+        scale: Scale factor to apply to translation animations (default: 1.0)
+
+    Returns:
+        The newly created FbxAnimStack in the destination scene, or None on failure
+    """
+    stack_name = src_stack.GetName()
+    print(f"  Copying animation stack: {stack_name}")
+
+    # Create new animation stack in destination scene
+    dst_stack = FbxAnimStack.Create(dst_scene, stack_name)
+    if not dst_stack:
+        print(f"    Error: Failed to create animation stack '{stack_name}'")
+        return None
+
+    # Copy time span
+    local_time_span = src_stack.GetLocalTimeSpan()
+    dst_stack.SetLocalTimeSpan(local_time_span)
+
+    # Copy reference time span if different
+    ref_time_span = src_stack.GetReferenceTimeSpan()
+    dst_stack.SetReferenceTimeSpan(ref_time_span)
+
+    # Get source animation layers
+    layer_criteria = get_anim_layer_criteria()
+    src_layer_count = src_stack.GetMemberCount(layer_criteria)
+    print(f"    Found {src_layer_count} animation layer(s)")
+
+    for layer_idx in range(src_layer_count):
+        src_layer = src_stack.GetMember(layer_criteria, layer_idx)
+        if not src_layer:
+            continue
+
+        layer_name = src_layer.GetName()
+        print(f"    Copying layer: {layer_name}")
+
+        # Create corresponding animation layer in destination
+        dst_layer = FbxAnimLayer.Create(dst_scene, layer_name)
+        if not dst_layer:
+            print(f"      Error: Failed to create animation layer '{layer_name}'")
+            continue
+
+        dst_stack.AddMember(dst_layer)
+
+        # Copy layer properties
+        dst_layer.Weight.Set(src_layer.Weight.Get())
+        dst_layer.Mute.Set(src_layer.Mute.Get())
+        dst_layer.Solo.Set(src_layer.Solo.Get())
+        dst_layer.Lock.Set(src_layer.Lock.Get())
+        dst_layer.BlendMode.Set(src_layer.BlendMode.Get())
+        dst_layer.RotationAccumulationMode.Set(src_layer.RotationAccumulationMode.Get())
+        dst_layer.ScaleAccumulationMode.Set(src_layer.ScaleAccumulationMode.Get())
+
+        # Get all nodes from source scene root
+        src_root = src_scene.GetRootNode()
+        src_nodes = get_all_nodes(src_root)
+
+        # Find the source armature/rig root to identify root bones
+        src_armature = find_skeleton_root(src_scene)
+        src_armature_name = src_armature.GetName() if src_armature else None
+
+        nodes_animated = 0
+
+        for src_node in src_nodes:
+            node_name = src_node.GetName()
+
+            # Find corresponding node in destination
+            dst_node = find_node_by_name(dst_root, node_name)
+            if not dst_node:
+                continue
+
+            # Check if this is a root bone (direct child of armature)
+            # These need rotation offset compensation
+            is_root_bone = False
+            parent = src_node.GetParent()
+            if parent and src_armature_name:
+                if parent.GetName() == src_armature_name:
+                    is_root_bone = True
+
+            # Determine rotation offset to apply
+            rot_offset = root_rotation_offset if (is_root_bone and root_rotation_offset) else None
+
+            # Check each animatable property
+            node_has_animation = False
+
+            # Translation - scale all bone translations
+            # Animation translation values are absolute positions that need to be
+            # scaled to match the target skeleton's coordinate system
+            src_trans_curve_node = src_node.LclTranslation.GetCurveNode(src_layer)
+            if src_trans_curve_node:
+                dst_trans_curve_node = dst_node.LclTranslation.GetCurveNode(dst_layer, True)
+                if dst_trans_curve_node:
+                    # For root bones with Z-up conversion, we may need to swizzle axes
+                    if is_root_bone and root_rotation_offset and abs(root_rotation_offset[0]) > 45:
+                        copy_curve_node_data_with_axis_swap(
+                            src_trans_curve_node, dst_trans_curve_node,
+                            src_layer, dst_layer, swap_yz=True, scale=scale)
+                    else:
+                        copy_curve_node_data(src_trans_curve_node, dst_trans_curve_node, src_layer, dst_layer, scale=scale)
+                    node_has_animation = True
+
+            # Rotation - need to bake in PreRotation from source if target has none
+            src_rot_curve_node = src_node.LclRotation.GetCurveNode(src_layer)
+            if src_rot_curve_node:
+                dst_rot_curve_node = dst_node.LclRotation.GetCurveNode(dst_layer, True)
+                if dst_rot_curve_node:
+                    # Get PreRotation difference between source and destination
+                    # If source has PreRotation but dest doesn't, we need to bake it in
+                    src_pre = src_node.PreRotation.Get()
+                    dst_pre = dst_node.PreRotation.Get()
+                    pre_rot_offset = (
+                        src_pre[0] - dst_pre[0],
+                        src_pre[1] - dst_pre[1],
+                        src_pre[2] - dst_pre[2]
+                    )
+                    # Only apply if there's a significant PreRotation difference
+                    if abs(pre_rot_offset[0]) > 0.1 or abs(pre_rot_offset[1]) > 0.1 or abs(pre_rot_offset[2]) > 0.1:
+                        # Bake PreRotation into animation by adding it to each keyframe
+                        # PreRotation needs to be ADDED to the animation values (offset is subtracted, so negate)
+                        copy_curve_node_data_with_rotation_bake(src_rot_curve_node, dst_rot_curve_node,
+                                                                src_layer, dst_layer, pre_rot_offset)
+                    else:
+                        copy_curve_node_data(src_rot_curve_node, dst_rot_curve_node, src_layer, dst_layer, rot_offset)
+                    node_has_animation = True
+
+            # Scaling (no position scale applied to scale curves)
+            src_scale_curve_node = src_node.LclScaling.GetCurveNode(src_layer)
+            if src_scale_curve_node:
+                dst_scale_curve_node = dst_node.LclScaling.GetCurveNode(dst_layer, True)
+                if dst_scale_curve_node:
+                    copy_curve_node_data(src_scale_curve_node, dst_scale_curve_node, src_layer, dst_layer)
+                    node_has_animation = True
+
+            if node_has_animation:
+                nodes_animated += 1
+
+        print(f"      Animated {nodes_animated} node(s)")
+
+    return dst_stack
+
+
+def merge_fbx_animations(model_fbx_path, anim_fbx_path, output_fbx_path, scale=1.0):
+    """
+    Append animation takes from anim_fbx into model_fbx and save to output_fbx.
+
+    Args:
+        model_fbx_path: Path to FBX file with rigged model and base animations
+        anim_fbx_path: Path to FBX file with additional animations to merge
+        output_fbx_path: Path for the output merged FBX file
+        scale: Scale factor for animation translations (default: 1.0)
+
+    Returns:
+        True on success, False on failure
+    """
+    print("FBX Animation Append Tool")
+    print("=" * 50)
+    print(f"Model file: {model_fbx_path}")
+    print(f"Animation file: {anim_fbx_path}")
+    print(f"Output file: {output_fbx_path}")
+    print()
+
+    # Select initialization functions (use FbxCommon if available, else fallbacks)
+    init_sdk = FbxCommon.InitializeSdkObjects if FbxCommon else InitializeSdkObjects
+    load_scene = FbxCommon.LoadScene if FbxCommon else LoadScene
+    save_scene = FbxCommon.SaveScene if FbxCommon else SaveScene
+
+    # Initialize SDK for model file
+    print("Loading model file...")
+    model_manager, model_scene = init_sdk()
+    if not load_scene(model_manager, model_scene, model_fbx_path):
+        print(f"Error: Failed to load model file: {model_fbx_path}")
+        model_manager.Destroy()
+        return False
+
+    # Initialize SDK for animation file
+    print("Loading animation file...")
+    anim_manager, anim_scene = init_sdk()
+    if not load_scene(anim_manager, anim_scene, anim_fbx_path):
+        print(f"Error: Failed to load animation file: {anim_fbx_path}")
+        model_manager.Destroy()
+        anim_manager.Destroy()
+        return False
+
+    # Auto-calculate scale if requested
+    if scale is None:
+        scale = calculate_auto_scale(anim_scene, model_scene)
+        if scale != 1.0:
+            print(f"Auto-detected scale factor: {scale:.6f}")
+    elif scale != 1.0:
+        print(f"Using scale factor: {scale}")
+
+    # Get animation stacks from both files
+    stack_criteria = get_anim_stack_criteria()
+    model_stack_count = model_scene.GetSrcObjectCount(stack_criteria)
+    anim_stack_count = anim_scene.GetSrcObjectCount(stack_criteria)
+
+    print(f"\nModel file has {model_stack_count} animation stack(s):")
+    for i in range(model_stack_count):
+        stack = model_scene.GetSrcObject(stack_criteria, i)
+        print(f"  - {stack.GetName()}")
+
+    print(f"\nAnimation file has {anim_stack_count} animation stack(s):")
+    for i in range(anim_stack_count):
+        stack = anim_scene.GetSrcObject(stack_criteria, i)
+        print(f"  - {stack.GetName()}")
+
+    # Get existing stack names to avoid duplicates
+    existing_names = set()
+    for i in range(model_stack_count):
+        stack = model_scene.GetSrcObject(stack_criteria, i)
+        existing_names.add(stack.GetName())
+
+    # Calculate rotation offset between armatures (handles Z-up vs Y-up)
+    print("\nAnalyzing coordinate systems...")
+    rotation_offset = get_armature_rotation_offset(anim_scene, model_scene)
+
+    # Copy animation stacks from animation file to model scene
+    print("\nCopying animation stacks...")
+    dst_root = model_scene.GetRootNode()
+    stacks_copied = 0
+
+    for i in range(anim_stack_count):
+        src_stack = anim_scene.GetSrcObject(stack_criteria, i)
+        stack_name = src_stack.GetName()
+
+        # Check for duplicate names and rename if necessary
+        original_name = stack_name
+        counter = 1
+        while stack_name in existing_names:
+            stack_name = f"{original_name}_{counter}"
+            counter += 1
+
+        if stack_name != original_name:
+            print(f"  Renaming '{original_name}' to '{stack_name}' to avoid duplicate")
+            src_stack.SetName(stack_name)
+
+        result = copy_animation_stack(anim_scene, src_stack, model_scene, dst_root, rotation_offset, scale)
+        if result:
+            existing_names.add(stack_name)
+            stacks_copied += 1
+
+    print(f"\nSuccessfully copied {stacks_copied} animation stack(s)")
+
+    # Verify total stacks
+    final_stack_count = model_scene.GetSrcObjectCount(stack_criteria)
+    print(f"Output file will have {final_stack_count} animation stack(s):")
+    for i in range(final_stack_count):
+        stack = model_scene.GetSrcObject(stack_criteria, i)
+        print(f"  - {stack.GetName()}")
+
+    # Save the merged scene
+    print(f"\nSaving merged file to: {output_fbx_path}")
+
+    # Determine file format (binary or ASCII)
+    file_format = -1  # Auto-detect based on extension
+    if output_fbx_path.lower().endswith('.fbx'):
+        # Use binary FBX format for better compatibility
+        file_format = model_manager.GetIOPluginRegistry().GetNativeWriterFormat()
+
+    result = save_scene(model_manager, model_scene, output_fbx_path, file_format)
+
+    if result:
+        print("Success! Merged FBX file saved.")
+    else:
+        print("Error: Failed to save merged file.")
+
+    # Cleanup
+    anim_manager.Destroy()
+    model_manager.Destroy()
+
+    return result
+
+
+def print_usage():
+    """Print usage information."""
+    print(__doc__)
+
+
+def parse_args():
+    """Parse command line arguments."""
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description='Merge FBX animation takes from one file into another.',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog='''
+Examples:
+  %(prog)s character.fbx animations.fbx merged.fbx
+  %(prog)s character.fbx animations.fbx merged.fbx --scale auto
+  %(prog)s character.fbx animations.fbx merged.fbx --scale 0.01
+'''
+    )
+
+    parser.add_argument('model_fbx', help='FBX file with rigged model and base animations')
+    parser.add_argument('anim_fbx', help='FBX file with additional animations to merge')
+    parser.add_argument('output_fbx', help='Output FBX file path')
+    parser.add_argument('--scale', type=str, default='1.0',
+                        help='Scale factor for animation translations. '
+                             'Use "auto" to auto-detect from skeleton size, '
+                             'or a number like 0.01 if animations are 100x too big. '
+                             '(default: 1.0)')
+
+    return parser.parse_args()
+
+
+def main():
+    """Main entry point."""
+    args = parse_args()
+
+    model_fbx = args.model_fbx
+    anim_fbx = args.anim_fbx
+    output_fbx = args.output_fbx
+
+    # Parse scale argument
+    if args.scale.lower() == 'auto':
+        scale = None  # Will be auto-calculated
+    else:
+        try:
+            scale = float(args.scale)
+            if scale <= 0:
+                print(f"Error: Scale must be positive, got {scale}")
+                sys.exit(1)
+        except ValueError:
+            print(f"Error: Invalid scale value '{args.scale}'. Use 'auto' or a number.")
+            sys.exit(1)
+
+    # Validate input files exist
+    if not os.path.isfile(model_fbx):
+        print(f"Error: Model file not found: {model_fbx}")
+        sys.exit(1)
+
+    if not os.path.isfile(anim_fbx):
+        print(f"Error: Animation file not found: {anim_fbx}")
+        sys.exit(1)
+
+    # Check output directory exists
+    output_dir = os.path.dirname(output_fbx)
+    if output_dir and not os.path.isdir(output_dir):
+        print(f"Error: Output directory does not exist: {output_dir}")
+        sys.exit(1)
+
+    # Perform the merge
+    success = merge_fbx_animations(model_fbx, anim_fbx, output_fbx, scale)
+
+    sys.exit(0 if success else 1)
+
+
+if __name__ == "__main__":
+    main()

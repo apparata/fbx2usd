@@ -414,6 +414,105 @@ No FBX SDK required - this tool only reads USD files.
 
 ---
 
+# append-fbx-skeletal-animation
+
+A Python command-line tool for merging animation takes from one FBX file into another. Useful for combining animations from different sources (e.g., Mixamo) into a single FBX file before converting to USD.
+
+## Features
+
+- **Animation Merging**: Copies animation stacks (takes) from a source FBX into a destination FBX
+- **Skeleton Matching**: Automatically maps bones between files with identical or similar skeleton hierarchies
+- **Coordinate System Handling**: Detects and compensates for Z-up vs Y-up differences between files
+- **Scale Adjustment**: Optional scale factor for animations (useful when source animations are in different units)
+- **Auto-Scale Detection**: Can automatically calculate scale factor based on skeleton size differences
+- **PreRotation Baking**: Handles bone PreRotation differences by baking them into animation curves
+- **Duplicate Handling**: Automatically renames animation stacks to avoid name conflicts
+
+## Requirements
+
+- Python 3.x
+- Autodesk FBX SDK Python bindings
+
+## Usage
+
+### Basic Usage
+
+Merge animations from one FBX file into another:
+
+```bash
+python3 append-fbx-skeletal-animation model.fbx animations.fbx output.fbx
+```
+
+### With Scale Factor
+
+If the animation source uses different units (e.g., Mixamo animations are often 100x larger):
+
+```bash
+python3 append-fbx-skeletal-animation model.fbx mixamo_anims.fbx output.fbx --scale 0.01
+```
+
+### Auto-Scale Detection
+
+Let the tool automatically detect the scale difference based on skeleton size:
+
+```bash
+python3 append-fbx-skeletal-animation model.fbx animations.fbx output.fbx --scale auto
+```
+
+### Options
+
+```
+append-fbx-skeletal-animation <model.fbx> <animations.fbx> <output.fbx> [options]
+
+Arguments:
+  model.fbx       FBX file with rigged model and base animations
+  animations.fbx  FBX file with additional animations to merge
+  output.fbx      Output FBX file path
+
+Options:
+  --scale FACTOR  Scale factor for animation translations (default: 1.0)
+                  Use "auto" to auto-detect from skeleton size
+                  Use 0.01 if animations are 100x too big
+                  Use 100 if animations are 100x too small
+```
+
+## Workflow Example
+
+Combining a character model with Mixamo animations:
+
+1. Export your rigged character from Blender/Maya as `character.fbx`
+2. Download animations from Mixamo for the same skeleton
+3. Merge the animations:
+   ```bash
+   python3 append-fbx-skeletal-animation character.fbx mixamo_walk.fbx character_with_walk.fbx --scale 0.01
+   python3 append-fbx-skeletal-animation character_with_walk.fbx mixamo_run.fbx character_final.fbx --scale 0.01
+   ```
+4. Convert to USD:
+   ```bash
+   python3 fbx2usd -s character_final.fbx output/Character.usda
+   ```
+
+## How It Works
+
+1. Loads both FBX files using the Autodesk FBX SDK
+2. Analyzes skeleton hierarchies to build bone name mappings
+3. Detects coordinate system differences (Z-up vs Y-up) and calculates rotation offsets
+4. For each animation stack in the source file:
+   - Creates a new animation stack in the destination
+   - Copies all animation layers with their properties
+   - Transfers keyframe data for translation, rotation, and scale
+   - Applies coordinate system transformations and scale adjustments
+   - Bakes PreRotation differences into animation curves
+5. Saves the merged result to a new FBX file
+
+## Notes
+
+- Both FBX files should have compatible skeleton hierarchies (same bone names)
+- The tool preserves cubic interpolation and tangent data when copying keyframes
+- Animation stacks with duplicate names are automatically renamed with a numeric suffix
+
+---
+
 ## Acknowledgments
 
 - Built using Pixar's Universal Scene Description (USD)
