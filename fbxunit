@@ -6,7 +6,7 @@ Converts an FBX file from one unit system to another, scaling all geometry,
 transforms, and animations appropriately.
 
 Usage:
-    python3 fbxunit <input.fbx> <output.fbx> <unit>
+    python3 fbxunit <input.fbx> <output.fbx> <unit> [--no-scale]
 
 Where <unit> is one of:
     m, meters       - Convert to meters
@@ -15,8 +15,12 @@ Where <unit> is one of:
     in, inches      - Convert to inches
     ft, feet        - Convert to feet
 
+Options:
+    --no-scale      Only change unit metadata without scaling geometry
+
 Example:
     python3 fbxunit model.fbx model_meters.fbx m
+    python3 fbxunit model.fbx model_meters.fbx m --no-scale
 """
 
 import sys
@@ -106,16 +110,15 @@ def get_current_unit_info(scene):
     return scale_factor, scale_string
 
 
-def convert_scene_units(scene, target_unit):
+def convert_scene_units(scene, target_unit, scale_geometry=True):
     """
-    Convert the scene to target units, scaling all geometry and transforms.
+    Convert the scene to target units.
 
-    Uses FBX SDK's built-in ConvertScene method which handles:
-    - Vertex positions
-    - Node transforms (translation)
-    - Animation curves (translation keyframes)
-    - Camera and light properties
-    - Other distance-based properties
+    Args:
+        scene: The FBX scene to convert
+        target_unit: The target FbxSystemUnit
+        scale_geometry: If True, scale all geometry and transforms.
+                       If False, only change the unit metadata.
     """
     global_settings = scene.GetGlobalSettings()
     current_unit = global_settings.GetSystemUnit()
@@ -124,10 +127,19 @@ def convert_scene_units(scene, target_unit):
     # ConversionFactorTo gives the multiplier to convert FROM current TO target
     conversion_factor = current_unit.GetConversionFactorTo(target_unit)
 
-    print(f"Conversion factor: {conversion_factor}")
-
-    # Use FBX SDK's built-in conversion which handles everything properly
-    target_unit.ConvertScene(scene)
+    if scale_geometry:
+        print(f"Conversion factor: {conversion_factor}")
+        # Use FBX SDK's built-in conversion which handles everything properly:
+        # - Vertex positions
+        # - Node transforms (translation)
+        # - Animation curves (translation keyframes)
+        # - Camera and light properties
+        # - Other distance-based properties
+        target_unit.ConvertScene(scene)
+    else:
+        print("Changing unit metadata only (no geometry scaling)")
+        # Only change the unit setting without scaling any values
+        global_settings.SetSystemUnit(target_unit)
 
     return True
 
@@ -147,13 +159,17 @@ Units:
 Examples:
   %(prog)s model.fbx model_meters.fbx m
   %(prog)s model.fbx model_cm.fbx cm
+  %(prog)s model.fbx model_meters.fbx m --no-scale
 
-This tool converts all geometry, transforms, and animations to the target unit.
+By default, this tool converts all geometry, transforms, and animations to the
+target unit. Use --no-scale to only change the unit metadata without scaling.
 '''
     )
     parser.add_argument('input', help='Input FBX file path')
     parser.add_argument('output', help='Output FBX file path')
     parser.add_argument('unit', help='Target unit (m, cm, mm, in, ft)')
+    parser.add_argument('--no-scale', action='store_true',
+                        help='Only change unit metadata without scaling geometry')
 
     args = parser.parse_args()
 
@@ -194,7 +210,7 @@ This tool converts all geometry, transforms, and animations to the target unit.
 
     # Convert scene to target units
     print("Converting scene...")
-    if not convert_scene_units(scene, target_unit):
+    if not convert_scene_units(scene, target_unit, scale_geometry=not args.no_scale):
         print("Error: Failed to convert units", file=sys.stderr)
         manager.Destroy()
         sys.exit(1)

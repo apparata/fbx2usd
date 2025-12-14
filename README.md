@@ -543,16 +543,18 @@ Hips
 
 # fbxunit
 
-A Python command-line tool for converting an FBX file from one unit system to another, scaling all geometry, transforms, and animations appropriately.
+A Python command-line tool for converting an FBX file from one unit system to another, with options to scale geometry or only change metadata.
 
 ## Purpose
 
-Convert FBX files between different unit systems (e.g., centimeters to meters). The tool uses the FBX SDK's built-in unit conversion which properly scales:
+Convert FBX files between different unit systems (e.g., centimeters to meters). By default, the tool uses the FBX SDK's built-in unit conversion which properly scales:
 - Vertex positions
 - Node transforms (translations)
 - Animation curves (translation keyframes)
 - Camera and light properties
 - Other distance-based properties
+
+Alternatively, use `--no-scale` to only change the unit metadata without modifying any geometry values.
 
 ## Requirements
 
@@ -562,7 +564,7 @@ Convert FBX files between different unit systems (e.g., centimeters to meters). 
 ## Usage
 
 ```bash
-python3 fbxunit <input.fbx> <output.fbx> <unit>
+python3 fbxunit <input.fbx> <output.fbx> <unit> [--no-scale]
 ```
 
 ### Supported Units
@@ -575,20 +577,27 @@ python3 fbxunit <input.fbx> <output.fbx> <unit>
 | Inches | in, inches |
 | Feet | ft, feet |
 
+### Options
+
+| Option | Description |
+|--------|-------------|
+| `--no-scale` | Only change unit metadata without scaling geometry |
+
 ### Examples
 
-Convert from centimeters to meters:
+Convert from centimeters to meters (scales geometry):
 ```bash
 python3 fbxunit model.fbx model_meters.fbx m
 ```
 
-Convert from meters to centimeters:
+Change unit metadata only (no scaling):
 ```bash
-python3 fbxunit model.fbx model_cm.fbx cm
+python3 fbxunit model.fbx model_meters.fbx m --no-scale
 ```
 
 ### Output
 
+With scaling (default):
 ```
 Loading: model.fbx
 Current unit: cm (scale factor: 1.0)
@@ -600,9 +609,91 @@ Saving: model_meters.fbx
 Done!
 ```
 
+With `--no-scale`:
+```
+Loading: model.fbx
+Current unit: cm (scale factor: 1.0)
+Target unit: meters
+Converting scene...
+Changing unit metadata only (no geometry scaling)
+New unit: m (scale factor: 100.0)
+Saving: model_meters.fbx
+Done!
+```
+
+## When to Use Each Mode
+
+- **Default (with scaling)**: Use when you want to convert the actual size of the model. For example, a 180cm character becomes 1.8m.
+- **`--no-scale`**: Use when the geometry values are already correct but the unit metadata is wrong. For example, a model authored in meters but incorrectly tagged as centimeters.
+
+---
+
+# fbxscale
+
+A Python command-line tool for scaling FBX geometry without changing the unit metadata. Useful for fixing models that are the wrong size but have the correct unit setting.
+
+## Purpose
+
+Scale all geometry, transforms, and animations in an FBX file by a given factor while preserving the original unit metadata. This is the opposite of `fbxunit --no-scale` - it changes the geometry but keeps the unit.
+
+## Requirements
+
+- Python 3.x
+- Autodesk FBX SDK Python bindings
+
+## Usage
+
+```bash
+python3 fbxscale <input.fbx> <output.fbx> <scale_factor>
+```
+
+### Common Scale Factors
+
+| Factor | Effect |
+|--------|--------|
+| 0.01 | Make 100x smaller |
+| 0.1 | Make 10x smaller |
+| 10 | Make 10x larger |
+| 100 | Make 100x larger |
+
+### Examples
+
+Fix a model that's 100x too large:
+```bash
+python3 fbxscale model.fbx model_fixed.fbx 0.01
+```
+
+Make a model 10x larger:
+```bash
+python3 fbxscale tiny_model.fbx bigger_model.fbx 10
+```
+
+### Output
+
+```
+Loading: model.fbx
+Unit: cm (scale factor: 1.0)
+Scaling by factor: 0.01
+Scaling scene...
+Unit after scaling: cm (scale factor: 1.0)
+Saving: model_fixed.fbx
+Done!
+```
+
 ## How It Works
 
-The tool uses `FbxSystemUnit.ConvertScene()` from the FBX SDK, which automatically scales all distance-based values in the scene. For example, converting from centimeters to meters applies a 0.01 scale factor to all positions and translations.
+The tool uses a clever trick with the FBX SDK:
+1. Temporarily converts to a different unit scale (which scales all geometry)
+2. Restores the original unit metadata without scaling
+
+This achieves the effect of scaling geometry while preserving the unit setting.
+
+## When to Use
+
+Use `fbxscale` when:
+- A model has the correct unit (e.g., meters) but is 100x too large
+- You need to resize a model without changing its unit metadata
+- You're preparing models from different sources to be the same scale
 
 ---
 

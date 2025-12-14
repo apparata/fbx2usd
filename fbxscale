@@ -1,0 +1,286 @@
+#!/usr/bin/env python3
+"""
+fbxscale - FBX geometry scaler
+
+Scales all geometry, transforms, and animations in an FBX file by a given factor
+without changing the unit metadata. Useful for fixing models that are the wrong
+size but have the correct unit setting.
+
+Usage:
+    python3 fbxscale <input.fbx> <output.fbx> <scale_factor>
+
+Where <scale_factor> is a number like:
+    0.01  - Make 100x smaller (e.g., fix a model that's 100x too large)
+    0.1   - Make 10x smaller
+    10    - Make 10x larger
+    100   - Make 100x larger
+
+Example:
+    python3 fbxscale model.fbx model_fixed.fbx 0.01
+"""
+
+import sys
+import os
+import argparse
+
+try:
+    from fbx import *
+except ImportError:
+    print("Error: FBX Python SDK not found.", file=sys.stderr)
+    print("Please install the Autodesk FBX SDK from:", file=sys.stderr)
+    print("https://aps.autodesk.com/developer/overview/fbx-sdk", file=sys.stderr)
+    sys.exit(1)
+
+
+def load_fbx_scene(manager, filepath):
+    """Load an FBX scene from file."""
+    scene = FbxScene.Create(manager, "")
+    importer = FbxImporter.Create(manager, "")
+
+    if not importer.Initialize(filepath, -1, manager.GetIOSettings()):
+        print(f"Error: Failed to initialize importer: {importer.GetStatus().GetErrorString()}", file=sys.stderr)
+        importer.Destroy()
+        return None
+
+    if not importer.Import(scene):
+        print(f"Error: Failed to import scene: {importer.GetStatus().GetErrorString()}", file=sys.stderr)
+        importer.Destroy()
+        return None
+
+    importer.Destroy()
+    return scene
+
+
+def save_fbx_scene(manager, scene, filepath):
+    """Save an FBX scene to file."""
+    exporter = FbxExporter.Create(manager, "")
+
+    # Determine file format (binary FBX)
+    file_format = -1
+    if filepath.lower().endswith('.fbx'):
+        # Find binary FBX format
+        for i in range(manager.GetIOPluginRegistry().GetWriterFormatCount()):
+            if manager.GetIOPluginRegistry().WriterIsFBX(i):
+                desc = manager.GetIOPluginRegistry().GetWriterFormatDescription(i)
+                if 'binary' in desc.lower():
+                    file_format = i
+                    break
+
+    if file_format < 0:
+        file_format = manager.GetIOPluginRegistry().GetNativeWriterFormat()
+
+    if not exporter.Initialize(filepath, file_format, manager.GetIOSettings()):
+        print(f"Error: Failed to initialize exporter: {exporter.GetStatus().GetErrorString()}", file=sys.stderr)
+        exporter.Destroy()
+        return False
+
+    success = exporter.Export(scene)
+    exporter.Destroy()
+
+    return success
+
+
+def get_unit_info(scene):
+    """Get current unit information from the scene."""
+    global_settings = scene.GetGlobalSettings()
+    system_unit = global_settings.GetSystemUnit()
+    return system_unit.GetScaleFactor(), system_unit.GetScaleFactorAsString()
+
+
+def scale_scene(scene, scale_factor):
+    """
+    Scale the scene by converting to a temporary unit and back.
+
+    This uses the FBX SDK's ConvertScene to do the actual scaling work,
+    then restores the original unit setting.
+    """
+    global_settings = scene.GetGlobalSettings()
+    original_unit = global_settings.GetSystemUnit()
+    original_scale = original_unit.GetScaleFactor()
+
+    # Create a temporary unit that will cause the desired scaling
+    # ConvertScene scales by: original_scale / target_scale
+    # So to scale by scale_factor, we need: target_scale = original_scale / scale_factor
+    temp_scale = original_scale / scale_factor
+    temp_unit = FbxSystemUnit(temp_scale)
+
+    # Convert to temporary unit (this scales everything)
+    temp_unit.ConvertScene(scene)
+
+    # Now restore the original unit setting without scaling
+    # (just change the metadata)
+    global_settings.SetSystemUnit(original_unit)
+
+    return True
+
+
+def scale_node_recursive(node, scale_factor):
+    """
+    Recursively scale node translations.
+    Note: This is a fallback method - we prefer using ConvertScene trick.
+    """
+    if not node:
+        return
+
+    # Scale the translation
+    trans = node.LclTranslation.Get()
+    node.LclTranslation.Set(FbxDouble3(
+        trans[0] * scale_factor,
+        trans[1] * scale_factor,
+        trans[2] * scale_factor
+    ))
+
+    # Process children
+    for i in range(node.GetChildCount()):
+        scale_node_recursive(node.GetChild(i), scale_factor)
+
+
+def scale_mesh_vertices(scene, scale_factor):
+    """Scale all mesh vertices in the scene."""
+    root_node = scene.GetRootNode()
+
+    def process_node(node):
+        if not node:
+            return
+
+        attr = node.GetNodeAttribute()
+        if attr and attr.GetAttributeType() == FbxNodeAttribute.EType.eMesh:
+            mesh = node.GetMesh()
+            if mesh:
+                # Scale control points (vertices)
+                for i in range(mesh.GetControlPointsCount()):
+                    point = mesh.GetControlPointAt(i)
+                    mesh.SetControlPointAt(FbxVector4(
+                        point[0] * scale_factor,
+                        point[1] * scale_factor,
+                        point[2] * scale_factor,
+                        point[3]
+                    ), i)
+
+        for i in range(node.GetChildCount()):
+            process_node(node.GetChild(i))
+
+    process_node(root_node)
+
+
+def scale_animation_translations(scene, scale_factor):
+    """Scale all translation animation curves in the scene."""
+    # Get animation stacks
+    for stack_idx in range(scene.GetSrcObjectCount(FbxCriteria.ObjectType(FbxAnimStack.ClassId))):
+        stack = scene.GetSrcObject(FbxCriteria.ObjectType(FbxAnimStack.ClassId), stack_idx)
+        if not stack:
+            continue
+
+        # Get animation layers
+        for layer_idx in range(stack.GetMemberCount(FbxCriteria.ObjectType(FbxAnimLayer.ClassId))):
+            layer = stack.GetMember(FbxCriteria.ObjectType(FbxAnimLayer.ClassId), layer_idx)
+            if not layer:
+                continue
+
+            # Process all nodes
+            scale_node_animation_recursive(scene.GetRootNode(), layer, scale_factor)
+
+
+def scale_node_animation_recursive(node, layer, scale_factor):
+    """Recursively scale translation animation curves for a node."""
+    if not node:
+        return
+
+    # Check for translation animation
+    trans_curve_node = node.LclTranslation.GetCurveNode(layer)
+    if trans_curve_node:
+        for channel_idx in range(trans_curve_node.GetChannelsCount()):
+            curve = trans_curve_node.GetCurve(channel_idx)
+            if curve:
+                curve.KeyModifyBegin()
+                for key_idx in range(curve.KeyGetCount()):
+                    value = curve.KeyGetValue(key_idx)
+                    curve.KeySetValue(key_idx, value * scale_factor)
+                curve.KeyModifyEnd()
+
+    # Process children
+    for i in range(node.GetChildCount()):
+        scale_node_animation_recursive(node.GetChild(i), layer, scale_factor)
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description='Scale FBX geometry without changing unit metadata.',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog='''
+Common scale factors:
+  0.01  - Make 100x smaller (cm values that should be meters)
+  0.1   - Make 10x smaller
+  10    - Make 10x larger
+  100   - Make 100x larger
+
+Examples:
+  %(prog)s model.fbx model_fixed.fbx 0.01
+  %(prog)s tiny_model.fbx bigger_model.fbx 100
+
+This tool scales all geometry, transforms, and animations while preserving
+the original unit setting. Use this when a model is the wrong size but has
+the correct unit metadata.
+'''
+    )
+    parser.add_argument('input', help='Input FBX file path')
+    parser.add_argument('output', help='Output FBX file path')
+    parser.add_argument('scale', type=float, help='Scale factor (e.g., 0.01, 10, 100)')
+
+    args = parser.parse_args()
+
+    # Validate scale factor
+    if args.scale <= 0:
+        print(f"Error: Scale factor must be positive, got {args.scale}", file=sys.stderr)
+        sys.exit(1)
+
+    # Validate input file
+    if not os.path.exists(args.input):
+        print(f"Error: Input file not found: {args.input}", file=sys.stderr)
+        sys.exit(1)
+
+    # Initialize FBX SDK
+    manager = FbxManager.Create()
+    if not manager:
+        print("Error: Failed to create FBX Manager", file=sys.stderr)
+        sys.exit(1)
+
+    ios = FbxIOSettings.Create(manager, IOSROOT)
+    manager.SetIOSettings(ios)
+
+    # Load scene
+    print(f"Loading: {args.input}")
+    scene = load_fbx_scene(manager, args.input)
+    if not scene:
+        manager.Destroy()
+        sys.exit(1)
+
+    # Get unit info
+    unit_scale, unit_name = get_unit_info(scene)
+    print(f"Unit: {unit_name} (scale factor: {unit_scale})")
+    print(f"Scaling by factor: {args.scale}")
+
+    # Scale the scene
+    print("Scaling scene...")
+    if not scale_scene(scene, args.scale):
+        print("Error: Failed to scale scene", file=sys.stderr)
+        manager.Destroy()
+        sys.exit(1)
+
+    # Verify unit unchanged
+    new_unit_scale, new_unit_name = get_unit_info(scene)
+    print(f"Unit after scaling: {new_unit_name} (scale factor: {new_unit_scale})")
+
+    # Save scene
+    print(f"Saving: {args.output}")
+    if not save_fbx_scene(manager, scene, args.output):
+        print("Error: Failed to save file", file=sys.stderr)
+        manager.Destroy()
+        sys.exit(1)
+
+    print("Done!")
+    manager.Destroy()
+
+
+if __name__ == '__main__':
+    main()
