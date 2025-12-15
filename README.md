@@ -699,6 +699,94 @@ Use `fbxscale` when:
 
 ---
 
+# fbxaxisconvert
+
+A C++ command-line tool for converting FBX files between different coordinate systems (axis conventions). Useful for preparing models for different game engines or 3D applications.
+
+## Features
+
+- **Multiple Target Systems**: Convert to RealityKit, Maya Y-Up, Maya Z-Up, 3ds Max, OpenGL, or DirectX coordinate systems
+- **Deep Conversion**: Uses FBX SDK's `DeepConvertScene` to properly convert all transforms and animations (default)
+- **Shallow Conversion**: Optional `--shallow` mode uses `ConvertScene` for faster node-only transforms
+- **Axis Information**: Displays detailed axis information (up, right, forward) for source and target systems
+
+## Requirements
+
+- macOS with Xcode command-line tools
+- Autodesk FBX SDK 2020.3.x installed at `/Applications/Autodesk/FBX SDK/2020.3.7`
+
+## Building
+
+```bash
+make
+```
+
+This creates a statically-linked `fbxaxisconvert` binary with no runtime dependencies on the FBX SDK dylib.
+
+## Usage
+
+```bash
+./fbxaxisconvert <input.fbx> <output.fbx> [options]
+```
+
+### Options
+
+| Option | Description |
+|--------|-------------|
+| `-t, --target <system>` | Target coordinate system (default: `maya-y-up`) |
+| `--shallow` | Use `ConvertScene` instead of `DeepConvertScene` |
+| `-h, --help` | Show help message |
+
+### Target Coordinate Systems
+
+| System | Description | Axes |
+|--------|-------------|------|
+| `realitykit` | RealityKit / SceneKit | up: +y, right: +x, forward: -z, right-handed |
+| `maya-y-up` | Maya Y-Up | up: +y, right: +x, forward: -z, right-handed |
+| `maya-z-up` | Maya Z-Up | up: +z, right: +x, forward: +y, right-handed |
+| `max` | 3ds Max | up: +z, right: +x, forward: +y, right-handed |
+| `opengl` | OpenGL | up: +y, right: +x, forward: -z, right-handed |
+| `directx` | DirectX | up: +y, right: -x, forward: -z, left-handed |
+
+### Examples
+
+Convert a Z-up model to Y-up for RealityKit:
+```bash
+./fbxaxisconvert model_zup.fbx model_yup.fbx -t realitykit
+```
+
+Convert to 3ds Max coordinate system:
+```bash
+./fbxaxisconvert model.fbx model_max.fbx -t max
+```
+
+Fast conversion without animation transform (shallow):
+```bash
+./fbxaxisconvert model.fbx model_converted.fbx -t maya-y-up --shallow
+```
+
+### Output
+
+```
+Loading: model_zup.fbx
+Current axis system: MayaZUp
+  (up: +z, right: +x, forward: +y, right-handed)
+Target axis system: MayaYUp
+  (up: +y, right: +x, forward: -z, right-handed)
+Converting with DeepConvertScene...
+New axis system: MayaYUp
+  (up: +y, right: +x, forward: -z, right-handed)
+Saving: model_yup.fbx
+Done!
+```
+
+## Deep vs Shallow Conversion
+
+- **DeepConvertScene (default)**: Fully converts the scene including all transforms, vertex positions, animation curves, and other geometric data. Use this for complete conversion.
+- **ConvertScene (--shallow)**: Only rotates root-level node transforms. Faster but may not correctly handle all animation data or nested hierarchies.
+
+---
+
 # append-fbx-skeletal-animation
 
 A Python command-line tool for merging animation takes from one FBX file into another. Useful for combining animations from different sources (e.g., Mixamo) into a single FBX file before converting to USD.
