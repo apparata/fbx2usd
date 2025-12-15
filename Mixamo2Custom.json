@@ -1,0 +1,60 @@
+{
+  "mixamorig:Hips": "Hips",
+
+  "mixamorig:Spine": "Spine_01",
+  "mixamorig:Spine1": "Spine_02",
+  "mixamorig:Spine2": "Spine_03",
+
+  "mixamorig:Neck": "Neck",
+  "mixamorig:Head": "Head",
+
+  "mixamorig:RightShoulder": "Clavicle_R",
+  "mixamorig:RightArm": "Shoulder_R",
+  "mixamorig:RightForeArm": "Elbow_R",
+  "mixamorig:RightHand": "Hand_R",
+
+  "mixamorig:RightHandThumb1": "Thumb_01_1",
+  "mixamorig:RightHandThumb2": "Thumb_02_1",
+  "mixamorig:RightHandThumb3": "Thumb_03_1",
+
+  "mixamorig:RightHandIndex1": "IndexFinger_01_1",
+  "mixamorig:RightHandIndex2": "IndexFinger_02_1",
+  "mixamorig:RightHandIndex3": "IndexFinger_03_1",
+  "mixamorig:RightHandIndex4": "IndexFinger_04_1",
+
+  "mixamorig:RightHandMiddle1": "Finger_01_1",
+  "mixamorig:RightHandMiddle2": "Finger_02_1",
+  "mixamorig:RightHandMiddle3": "Finger_03_1",
+  "mixamorig:RightHandMiddle4": "Finger_04_1",
+
+  "mixamorig:LeftShoulder": "Clavicle_L",
+  "mixamorig:LeftArm": "Shoulder_L",
+  "mixamorig:LeftForeArm": "Elbow_L",
+  "mixamorig:LeftHand": "Hand_L",
+
+  "mixamorig:LeftHandThumb1": "Thumb_01",
+  "mixamorig:LeftHandThumb2": "Thumb_02",
+  "mixamorig:LeftHandThumb3": "Thumb_03",
+
+  "mixamorig:LeftHandIndex1": "IndexFinger_01",
+  "mixamorig:LeftHandIndex2": "IndexFinger_02",
+  "mixamorig:LeftHandIndex3": "IndexFinger_03",
+  "mixamorig:LeftHandIndex4": "IndexFinger_04",
+
+  "mixamorig:LeftHandMiddle1": "Finger_01",
+  "mixamorig:LeftHandMiddle2": "Finger_02",
+  "mixamorig:LeftHandMiddle3": "Finger_03",
+  "mixamorig:LeftHandMiddle4": "Finger_04",
+
+  "mixamorig:RightUpLeg": "UpperLeg_R",
+  "mixamorig:RightLeg": "LowerLeg_R",
+  "mixamorig:RightFoot": "Ankle_R",
+  "mixamorig:RightToeBase": "Ball_R",
+  "mixamorig:RightToe_End": "Toes_R",
+
+  "mixamorig:LeftUpLeg": "UpperLeg_L",
+  "mixamorig:LeftLeg": "LowerLeg_L",
+  "mixamorig:LeftFoot": "Ankle_L",
+  "mixamorig:LeftToeBase": "Ball_L",
+  "mixamorig:LeftToe_End": "Toes_L"
+}

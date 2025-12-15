@@ -1,0 +1,1899 @@
+#!/usr/bin/env python3
+"""
+retarget-mixamo (FbxCommon-free)
+
+Retarget Mixamo FBX animation onto a custom rig using Autodesk FBX Python SDK.
+- Keeps the target skeleton (joint names/hierarchy) unchanged
+- Writes a new AnimStack onto the TARGET scene
+- Handles a target "Root" bone even if Mixamo has no Root by deriving Root motion from Mixamo Hips
+- Does NOT depend on FbxCommon.py
+
+Core method (LOCAL rotation delta):
+  For each mapped bone b at time t:
+    Qdelta_local(t,b) = Q_local(t,b) * inverse(Q_local_rest(b))
+    Q_target_local(t,b) = Qdelta_local(t,b) * Q_target_local_rest(b)
+  Then convert quaternion to Euler and write rotation curves directly.
+
+  This LOCAL method works even when source and target skeletons have different
+  global orientations at rest (e.g., different T-pose arm angles).
+  Scale is computed from hip heights to handle skeletons with different world scales.
+
+Notes:
+- FBX files vary. This script is defensive:
+  - Skips missing bone pairs (warns)
+  - Uses axis/unit conversion from source->target by default
+- PreRotation/PostRotation in FBX can be tricky. We work in matrices and decompose at the end.
+
+Usage example:
+  python3 retarget-mixamo --source mixamo_walk.fbx --target synty.fbx --map map.json --out out.fbx
+"""
+
+import argparse
+import json
+import re
+import sys
+from typing import Dict, List, Tuple, Optional
+import fbx
+import math
+
+# ----------------------------
+# Math
+# ----------------------------
+
+# Tolerance for near-zero determinant (singular matrix)
+DETERMINANT_EPSILON = 1e-12
+# Tolerance for rotation values near gimbal lock
+GIMBAL_EPSILON = 1e-6
+
+
+def vec_has_nan(v: fbx.FbxVector4) -> bool:
+    """Check if any component of a vector is NaN or Inf."""
+    for i in range(4):
+        val = float(v[i])
+        if math.isnan(val) or math.isinf(val):
+            return True
+    return False
+
+
+def mat_has_nan(m: fbx.FbxAMatrix) -> bool:
+    """Check if any TRS component of the matrix contains NaN/Inf."""
+    t = m.GetT()
+    s = m.GetS()
+    if vec_has_nan(t) or vec_has_nan(s):
+        return True
+    # GetR() itself can produce NaN from decomposition; check quaternion instead
+    q = m.GetQ()
+    for i in range(4):
+        val = float(q[i])
+        if math.isnan(val) or math.isinf(val):
+            return True
+    return False
+
+
+def mat3x3_determinant(m: fbx.FbxAMatrix) -> float:
+    """
+    Compute the determinant of the upper-left 3x3 (rotation+scale) portion.
+    FbxAMatrix.Get(row, col) accesses elements.
+    """
+    # Extract 3x3 elements
+    a = float(m.Get(0, 0)); b = float(m.Get(0, 1)); c = float(m.Get(0, 2))
+    d = float(m.Get(1, 0)); e = float(m.Get(1, 1)); f = float(m.Get(1, 2))
+    g = float(m.Get(2, 0)); h = float(m.Get(2, 1)); i = float(m.Get(2, 2))
+    det = a * (e * i - f * h) - b * (d * i - f * g) + c * (d * h - e * g)
+    return det
+
+
+def safe_inverse(m: fbx.FbxAMatrix, context: str = "") -> fbx.FbxAMatrix:
+    """
+    Safely invert a matrix. Returns identity if:
+    - Input has NaN/Inf
+    - Determinant is near zero (singular)
+    - Result has NaN/Inf
+    """
+    if mat_has_nan(m):
+        if context:
+            eprint(f"[warn] safe_inverse: input matrix has NaN ({context}), returning identity")
+        return identity_matrix()
+
+    det = mat3x3_determinant(m)
+    if abs(det) < DETERMINANT_EPSILON:
+        if context:
+            eprint(f"[warn] safe_inverse: near-singular matrix det={det:.2e} ({context}), returning identity")
+        return identity_matrix()
+
+    inv = fbx.FbxAMatrix(m)
+    inv = inv.Inverse()
+
+    if mat_has_nan(inv):
+        if context:
+            eprint(f"[warn] safe_inverse: inverse produced NaN ({context}), returning identity")
+        return identity_matrix()
+
+    return inv
+
+
+def safe_evaluate_global(node: fbx.FbxNode, t: fbx.FbxTime, context: str = "") -> fbx.FbxAMatrix:
+    """
+    Safely evaluate a node's global transform. Returns identity if result is invalid.
+    """
+    try:
+        m = node.EvaluateGlobalTransform(t)
+        if mat_has_nan(m):
+            if context:
+                eprint(f"[warn] safe_evaluate_global: NaN in result ({context})")
+            return identity_matrix()
+        return m
+    except Exception as ex:
+        if context:
+            eprint(f"[warn] safe_evaluate_global: exception ({context}): {ex}")
+        return identity_matrix()
+
+
+def clamp(val: float, lo: float, hi: float) -> float:
+    """Clamp a value to a range."""
+    return max(lo, min(hi, val))
+
+
+def sanitize_euler(rot: fbx.FbxVector4) -> Tuple[float, float, float]:
+    """
+    Sanitize Euler angles from GetR(). Clamp to [-360, 360] and replace NaN/Inf.
+    Returns (rx, ry, rz) as floats.
+    """
+    result = []
+    for i in range(3):
+        val = float(rot[i])
+        if math.isnan(val) or math.isinf(val):
+            val = 0.0
+        else:
+            # Normalize to [-360, 360] - prevents drift accumulation
+            val = math.fmod(val, 360.0)
+        result.append(val)
+    return (result[0], result[1], result[2])
+
+
+def quaternion_to_euler_safe(q: fbx.FbxQuaternion) -> Tuple[float, float, float]:
+    """
+    Convert quaternion to Euler angles (XYZ order, degrees) with gimbal lock handling.
+    This avoids the NaN issues that can occur with FbxAMatrix.GetR().
+    """
+    # Extract quaternion components
+    qx = float(q[0])
+    qy = float(q[1])
+    qz = float(q[2])
+    qw = float(q[3])
+
+    # Check for NaN in quaternion
+    if any(math.isnan(v) or math.isinf(v) for v in [qx, qy, qz, qw]):
+        return (0.0, 0.0, 0.0)
+
+    # Normalize quaternion
+    norm = math.sqrt(qx*qx + qy*qy + qz*qz + qw*qw)
+    if norm < 1e-10:
+        return (0.0, 0.0, 0.0)
+    qx /= norm
+    qy /= norm
+    qz /= norm
+    qw /= norm
+
+    # Convert to Euler (XYZ rotation order)
+    # See: https://www.euclideanspace.com/maths/geometry/rotations/conversions/quaternionToEuler/
+
+    # Test for gimbal lock
+    test = qx * qy + qz * qw
+
+    if test > 0.499:  # North pole gimbal lock
+        ry = 2.0 * math.atan2(qx, qw)
+        rz = math.pi / 2.0
+        rx = 0.0
+    elif test < -0.499:  # South pole gimbal lock
+        ry = -2.0 * math.atan2(qx, qw)
+        rz = -math.pi / 2.0
+        rx = 0.0
+    else:
+        sqx = qx * qx
+        sqy = qy * qy
+        sqz = qz * qz
+
+        ry = math.atan2(2.0 * qy * qw - 2.0 * qx * qz, 1.0 - 2.0 * sqy - 2.0 * sqz)
+        rz = math.asin(clamp(2.0 * test, -1.0, 1.0))
+        rx = math.atan2(2.0 * qx * qw - 2.0 * qy * qz, 1.0 - 2.0 * sqx - 2.0 * sqz)
+
+    # Convert to degrees
+    return (math.degrees(rx), math.degrees(ry), math.degrees(rz))
+
+
+def matrix_to_local_euler_safe(m: fbx.FbxAMatrix) -> Tuple[float, float, float]:
+    """
+    Extract Euler rotation from matrix using quaternion intermediate to avoid GetR() NaN issues.
+    """
+    q = m.GetQ()
+    return quaternion_to_euler_safe(q)
+
+
+def rotation_only_matrix(m: fbx.FbxAMatrix) -> fbx.FbxAMatrix:
+    """
+    Extract rotation-only matrix from a transform (strips translation and scale).
+    Uses quaternion to preserve rotation without scale artifacts.
+    """
+    result = fbx.FbxAMatrix()
+    result.SetT(fbx.FbxVector4(0.0, 0.0, 0.0, 0.0))
+    result.SetQ(m.GetQ())  # Quaternion preserves rotation without scale
+    result.SetS(fbx.FbxVector4(1.0, 1.0, 1.0, 0.0))
+    return result
+
+
+def get_uniform_scale(m: fbx.FbxAMatrix) -> float:
+    """Get the average scale factor from a matrix."""
+    s = m.GetS()
+    return (float(s[0]) + float(s[1]) + float(s[2])) / 3.0
+
+
+def quaternion_multiply(q1: fbx.FbxQuaternion, q2: fbx.FbxQuaternion) -> fbx.FbxQuaternion:
+    """Multiply two quaternions: q1 * q2."""
+    x1, y1, z1, w1 = float(q1[0]), float(q1[1]), float(q1[2]), float(q1[3])
+    x2, y2, z2, w2 = float(q2[0]), float(q2[1]), float(q2[2]), float(q2[3])
+
+    w = w1*w2 - x1*x2 - y1*y2 - z1*z2
+    x = w1*x2 + x1*w2 + y1*z2 - z1*y2
+    y = w1*y2 - x1*z2 + y1*w2 + z1*x2
+    z = w1*z2 + x1*y2 - y1*x2 + z1*w2
+
+    return fbx.FbxQuaternion(x, y, z, w)
+
+
+def quaternion_inverse(q: fbx.FbxQuaternion) -> fbx.FbxQuaternion:
+    """Compute the inverse (conjugate for unit quaternions) of a quaternion."""
+    x, y, z, w = float(q[0]), float(q[1]), float(q[2]), float(q[3])
+    norm_sq = x*x + y*y + z*z + w*w
+    if norm_sq < 1e-10:
+        return fbx.FbxQuaternion(0.0, 0.0, 0.0, 1.0)
+    # For unit quaternions, inverse = conjugate
+    # conjugate = (-x, -y, -z, w)
+    return fbx.FbxQuaternion(-x, -y, -z, w)
+
+
+def compute_rotation_delta(Sg: fbx.FbxAMatrix, Srest: fbx.FbxAMatrix) -> fbx.FbxQuaternion:
+    """
+    Compute rotation delta as quaternion: Qdelta = Qg * inverse(Qrest)
+    This is scale-invariant since we only use quaternions.
+    """
+    Qg = Sg.GetQ()
+    Qrest = Srest.GetQ()
+    Qrest_inv = quaternion_inverse(Qrest)
+    return quaternion_multiply(Qg, Qrest_inv)
+
+
+def apply_rotation_delta(Qdelta: fbx.FbxQuaternion, Trest: fbx.FbxAMatrix) -> fbx.FbxAMatrix:
+    """
+    Apply a rotation delta to a target rest pose: Qresult = Qdelta * Qrest_target
+    Returns a new matrix with the combined rotation, target translation, and unit scale.
+    """
+    Qrest = Trest.GetQ()
+    Qresult = quaternion_multiply(Qdelta, Qrest)
+
+    result = fbx.FbxAMatrix()
+    result.SetT(Trest.GetT())  # Keep target rest translation
+    result.SetQ(Qresult)
+    result.SetS(fbx.FbxVector4(1.0, 1.0, 1.0, 0.0))  # Unit scale
+    return result
+
+
+class RestPose:
+    """
+    Stores rest pose data extracted from FbxAMatrix.
+
+    IMPORTANT: FBX SDK's EvaluateGlobalTransform returns a matrix that shares
+    internal state - subsequent calls overwrite previous results! We must
+    extract values immediately and store them as Python floats.
+    """
+    def __init__(self, mat: fbx.FbxAMatrix, pre_rot: Optional[Tuple[float, float, float]] = None):
+        # Extract and store all values as Python floats
+        t = mat.GetT()
+        q = mat.GetQ()
+        s = mat.GetS()
+
+        self.tx = float(t[0])
+        self.ty = float(t[1])
+        self.tz = float(t[2])
+
+        self.qx = float(q[0])
+        self.qy = float(q[1])
+        self.qz = float(q[2])
+        self.qw = float(q[3])
+
+        self.sx = float(s[0])
+        self.sy = float(s[1])
+        self.sz = float(s[2])
+
+        # Store PreRotation if provided (as Euler degrees)
+        self.pre_rot = pre_rot  # (rx, ry, rz) or None
+
+    @classmethod
+    def from_local(cls, mat: fbx.FbxAMatrix) -> 'RestPose':
+        """Create RestPose from a local transform matrix."""
+        return cls(mat)
+
+    @classmethod
+    def from_node_properties(cls, node: fbx.FbxNode) -> 'RestPose':
+        """
+        Create RestPose from static node properties (LclTranslation, LclRotation, LclScaling).
+        This gives the LOCAL BIND POSE, ignoring any animation.
+        Includes PreRotation which is critical for Mixamo skeletons.
+        """
+        # Get static property values (not animated)
+        lcl_t = node.LclTranslation.Get()
+        lcl_r = node.LclRotation.Get()  # Euler in degrees
+        lcl_s = node.LclScaling.Get()
+        pre_r = node.PreRotation.Get()  # PreRotation (critical for Mixamo!)
+
+        # Build matrices
+        t_mat = fbx.FbxAMatrix()
+        t_mat.SetT(fbx.FbxVector4(lcl_t[0], lcl_t[1], lcl_t[2], 0.0))
+
+        pre_mat = fbx.FbxAMatrix()
+        pre_mat.SetR(fbx.FbxVector4(pre_r[0], pre_r[1], pre_r[2], 0.0))
+
+        r_mat = fbx.FbxAMatrix()
+        r_mat.SetR(fbx.FbxVector4(lcl_r[0], lcl_r[1], lcl_r[2], 0.0))
+
+        s_mat = fbx.FbxAMatrix()
+        s_mat.SetS(fbx.FbxVector4(lcl_s[0], lcl_s[1], lcl_s[2], 0.0))
+
+        # Full local transform: T * PreRotation * LclRotation * S
+        mat = t_mat * pre_mat * r_mat * s_mat
+
+        return cls(mat)
+
+    @classmethod
+    def from_node_global_bind(cls, node: fbx.FbxNode, scene_root: fbx.FbxNode) -> 'RestPose':
+        """
+        Compute GLOBAL bind pose by walking up the hierarchy and multiplying local bind poses.
+        This gives the true rest pose ignoring any animation.
+        Includes PreRotation which is critical for Mixamo skeletons.
+        """
+        # Build chain from node to root
+        chain = []
+        current = node
+        while current and current != scene_root:
+            chain.append(current)
+            current = current.GetParent()
+
+        # Multiply from root down to node
+        global_mat = fbx.FbxAMatrix()
+        global_mat.SetIdentity()
+
+        for n in reversed(chain):
+            lcl_t = n.LclTranslation.Get()
+            lcl_r = n.LclRotation.Get()
+            lcl_s = n.LclScaling.Get()
+            pre_r = n.PreRotation.Get()  # PreRotation (critical for Mixamo!)
+
+            # Build local transform: T * PreRotation * LclRotation * S
+            t_mat = fbx.FbxAMatrix()
+            t_mat.SetT(fbx.FbxVector4(lcl_t[0], lcl_t[1], lcl_t[2], 0.0))
+
+            pre_mat = fbx.FbxAMatrix()
+            pre_mat.SetR(fbx.FbxVector4(pre_r[0], pre_r[1], pre_r[2], 0.0))
+
+            r_mat = fbx.FbxAMatrix()
+            r_mat.SetR(fbx.FbxVector4(lcl_r[0], lcl_r[1], lcl_r[2], 0.0))
+
+            s_mat = fbx.FbxAMatrix()
+            s_mat.SetS(fbx.FbxVector4(lcl_s[0], lcl_s[1], lcl_s[2], 0.0))
+
+            local_mat = t_mat * pre_mat * r_mat * s_mat
+            global_mat = global_mat * local_mat
+
+        return cls(global_mat)
+
+    def get_quaternion(self) -> Tuple[float, float, float, float]:
+        return (self.qx, self.qy, self.qz, self.qw)
+
+    def get_translation(self) -> Tuple[float, float, float]:
+        return (self.tx, self.ty, self.tz)
+
+    def get_scale(self) -> Tuple[float, float, float]:
+        return (self.sx, self.sy, self.sz)
+
+    def get_uniform_scale(self) -> float:
+        return (self.sx + self.sy + self.sz) / 3.0
+
+    def to_matrix(self) -> fbx.FbxAMatrix:
+        """Reconstruct an FbxAMatrix from stored values."""
+        m = fbx.FbxAMatrix()
+        m.SetT(fbx.FbxVector4(self.tx, self.ty, self.tz, 0.0))
+        m.SetQ(fbx.FbxQuaternion(self.qx, self.qy, self.qz, self.qw))
+        m.SetS(fbx.FbxVector4(self.sx, self.sy, self.sz, 0.0))
+        return m
+
+
+def compute_rotation_delta_from_rest(
+    Sg: fbx.FbxAMatrix,
+    rest: RestPose
+) -> Tuple[float, float, float, float]:
+    """
+    Compute rotation delta as quaternion tuple: Qdelta = Qg * inverse(Qrest)
+    Uses stored RestPose to avoid FBX SDK caching issues.
+    """
+    Qg = Sg.GetQ()
+    qgx, qgy, qgz, qgw = float(Qg[0]), float(Qg[1]), float(Qg[2]), float(Qg[3])
+
+    # Get stored rest quaternion and compute inverse (conjugate for unit quat)
+    qrx, qry, qrz, qrw = rest.get_quaternion()
+    # Inverse = conjugate = (-x, -y, -z, w)
+    qrinv_x, qrinv_y, qrinv_z, qrinv_w = -qrx, -qry, -qrz, qrw
+
+    # Multiply: Qg * Qrest_inv
+    w = qgw*qrinv_w - qgx*qrinv_x - qgy*qrinv_y - qgz*qrinv_z
+    x = qgw*qrinv_x + qgx*qrinv_w + qgy*qrinv_z - qgz*qrinv_y
+    y = qgw*qrinv_y - qgx*qrinv_z + qgy*qrinv_w + qgz*qrinv_x
+    z = qgw*qrinv_z + qgx*qrinv_y - qgy*qrinv_x + qgz*qrinv_w
+
+    return (x, y, z, w)
+
+
+def compute_local_rotation_delta(
+    local_current: fbx.FbxAMatrix,
+    rest_local: RestPose
+) -> Tuple[float, float, float, float]:
+    """
+    Compute LOCAL rotation delta: Qdelta = Qlocal_current * inverse(Qlocal_rest)
+
+    This is the correct method for retargeting between skeletons with different
+    rest poses. We transfer the CHANGE in local rotation, not global orientation.
+    """
+    Qc = local_current.GetQ()
+    qcx, qcy, qcz, qcw = float(Qc[0]), float(Qc[1]), float(Qc[2]), float(Qc[3])
+
+    # Get stored rest local quaternion and compute inverse
+    qrx, qry, qrz, qrw = rest_local.get_quaternion()
+    qrinv_x, qrinv_y, qrinv_z, qrinv_w = -qrx, -qry, -qrz, qrw
+
+    # Multiply: Qcurrent * Qrest_inv
+    w = qcw*qrinv_w - qcx*qrinv_x - qcy*qrinv_y - qcz*qrinv_z
+    x = qcw*qrinv_x + qcx*qrinv_w + qcy*qrinv_z - qcz*qrinv_y
+    y = qcw*qrinv_y - qcx*qrinv_z + qcy*qrinv_w + qcz*qrinv_x
+    z = qcw*qrinv_z + qcx*qrinv_y - qcy*qrinv_x + qcz*qrinv_w
+
+    return (x, y, z, w)
+
+
+def apply_local_rotation_delta(
+    qdelta: Tuple[float, float, float, float],
+    rest_local: RestPose
+) -> Tuple[float, float, float, float]:
+    """
+    Apply LOCAL rotation delta to target rest local rotation.
+    Returns new local quaternion: Qresult = Qdelta * Qrest_local
+    """
+    dx, dy, dz, dw = qdelta
+    qrx, qry, qrz, qrw = rest_local.get_quaternion()
+
+    # Multiply: Qdelta * Qrest
+    w = dw*qrw - dx*qrx - dy*qry - dz*qrz
+    x = dw*qrx + dx*qrw + dy*qrz - dz*qry
+    y = dw*qry - dx*qrz + dy*qrw + dz*qrx
+    z = dw*qrz + dx*qry - dy*qrx + dz*qrw
+
+    return (x, y, z, w)
+
+
+def apply_rotation_delta_to_rest(
+    qdelta: Tuple[float, float, float, float],
+    rest: RestPose
+) -> fbx.FbxAMatrix:
+    """
+    Apply a rotation delta to a target rest pose.
+    Returns a new FbxAMatrix with combined rotation, rest translation, and unit scale.
+    """
+    dx, dy, dz, dw = qdelta
+    qrx, qry, qrz, qrw = rest.get_quaternion()
+
+    # Multiply: Qdelta * Qrest
+    w = dw*qrw - dx*qrx - dy*qry - dz*qrz
+    x = dw*qrx + dx*qrw + dy*qrz - dz*qry
+    y = dw*qry - dx*qrz + dy*qrw + dz*qrx
+    z = dw*qrz + dx*qry - dy*qrx + dz*qrw
+
+    result = fbx.FbxAMatrix()
+    result.SetT(fbx.FbxVector4(rest.tx, rest.ty, rest.tz, 0.0))
+    result.SetQ(fbx.FbxQuaternion(x, y, z, w))
+    result.SetS(fbx.FbxVector4(1.0, 1.0, 1.0, 0.0))  # Unit scale
+    return result
+
+
+def swing_twist_decompose(
+    q: Tuple[float, float, float, float],
+    twist_axis: Tuple[float, float, float]
+) -> Tuple[Tuple[float, float, float, float], Tuple[float, float, float, float]]:
+    """
+    Decompose quaternion q into swing and twist components around twist_axis.
+    q = swing * twist
+
+    Swing rotates the twist_axis to its new direction.
+    Twist rotates around the twist_axis.
+
+    Returns (swing, twist) as quaternion tuples (x, y, z, w).
+    """
+    qx, qy, qz, qw = q
+    ax, ay, az = twist_axis
+
+    # Project rotation axis onto twist axis
+    # twist = (q.xyz dot twist_axis) * twist_axis
+    dot = qx * ax + qy * ay + qz * az
+
+    # Twist quaternion: rotation around twist_axis
+    twist_x = ax * dot
+    twist_y = ay * dot
+    twist_z = az * dot
+    twist_w = qw
+
+    # Normalize twist
+    twist_norm = math.sqrt(twist_x*twist_x + twist_y*twist_y + twist_z*twist_z + twist_w*twist_w)
+    if twist_norm < 1e-10:
+        twist = (0.0, 0.0, 0.0, 1.0)
+    else:
+        twist = (twist_x/twist_norm, twist_y/twist_norm, twist_z/twist_norm, twist_w/twist_norm)
+
+    # Swing = q * inverse(twist)
+    # inverse(twist) = (-twist_xyz, twist_w) for unit quaternion
+    tx, ty, tz, tw = twist
+    tinv_x, tinv_y, tinv_z, tinv_w = -tx, -ty, -tz, tw
+
+    # swing = q * tinv
+    swing_w = qw*tinv_w - qx*tinv_x - qy*tinv_y - qz*tinv_z
+    swing_x = qw*tinv_x + qx*tinv_w + qy*tinv_z - qz*tinv_y
+    swing_y = qw*tinv_y - qx*tinv_z + qy*tinv_w + qz*tinv_x
+    swing_z = qw*tinv_z + qx*tinv_y - qy*tinv_x + qz*tinv_w
+
+    # Normalize swing
+    swing_norm = math.sqrt(swing_x*swing_x + swing_y*swing_y + swing_z*swing_z + swing_w*swing_w)
+    if swing_norm < 1e-10:
+        swing = (0.0, 0.0, 0.0, 1.0)
+    else:
+        swing = (swing_x/swing_norm, swing_y/swing_norm, swing_z/swing_norm, swing_w/swing_norm)
+
+    return (swing, twist)
+
+
+def quat_multiply(
+    q1: Tuple[float, float, float, float],
+    q2: Tuple[float, float, float, float]
+) -> Tuple[float, float, float, float]:
+    """Multiply two quaternions: result = q1 * q2"""
+    x1, y1, z1, w1 = q1
+    x2, y2, z2, w2 = q2
+
+    w = w1*w2 - x1*x2 - y1*y2 - z1*z2
+    x = w1*x2 + x1*w2 + y1*z2 - z1*y2
+    y = w1*y2 - x1*z2 + y1*w2 + z1*x2
+    z = w1*z2 + x1*y2 - y1*x2 + z1*w2
+
+    return (x, y, z, w)
+
+
+def quat_inverse(q: Tuple[float, float, float, float]) -> Tuple[float, float, float, float]:
+    """Return inverse of unit quaternion (conjugate)."""
+    x, y, z, w = q
+    return (-x, -y, -z, w)
+
+
+def get_bone_direction(node: fbx.FbxNode, t: fbx.FbxTime, prefer_middle_finger: bool = False) -> Optional[Tuple[float, float, float]]:
+    """
+    Get the normalized direction vector from this bone to a child.
+    This represents the bone's primary axis in world space.
+    Returns None if bone has no children or direction is zero-length.
+
+    If prefer_middle_finger is True and this looks like a hand bone (has multiple children),
+    try to use the middle finger child instead of the first child (thumb).
+    """
+    if node.GetChildCount() == 0:
+        return None
+
+    # For hand bones, prefer middle finger as reference (index 2 typically)
+    child_idx = 0
+    if prefer_middle_finger and node.GetChildCount() >= 3:
+        # Check if this looks like a hand (children are fingers)
+        child_names = [node.GetChild(i).GetName() for i in range(node.GetChildCount())]
+        has_finger_children = any("Finger" in n or "Index" in n or "Middle" in n for n in child_names)
+        if has_finger_children:
+            # Use middle finger (usually index 2) or index finger (index 1)
+            child_idx = min(2, node.GetChildCount() - 1)
+
+    child = node.GetChild(child_idx)
+    parent_mat = node.EvaluateGlobalTransform(t)
+    child_mat = child.EvaluateGlobalTransform(t)
+
+    parent_pos = parent_mat.GetT()
+    child_pos = child_mat.GetT()
+
+    dx = float(child_pos[0]) - float(parent_pos[0])
+    dy = float(child_pos[1]) - float(parent_pos[1])
+    dz = float(child_pos[2]) - float(parent_pos[2])
+
+    length = math.sqrt(dx*dx + dy*dy + dz*dz)
+    if length < 1e-6:
+        return None
+
+    return (dx/length, dy/length, dz/length)
+
+
+def get_bone_local_x_axis(node: fbx.FbxNode, t: fbx.FbxTime) -> Tuple[float, float, float]:
+    """
+    Get the bone's local X axis transformed to world space.
+    This is often the bone's primary/twist axis in FBX.
+    """
+    global_mat = node.EvaluateGlobalTransform(t)
+
+    # Transform local X axis (1,0,0) by the rotation part of global transform
+    # We use the rotation matrix columns: column 0 = transformed X axis
+    # FbxAMatrix stores rotation, we can extract the X axis direction
+    q = global_mat.GetQ()
+    qx, qy, qz, qw = float(q[0]), float(q[1]), float(q[2]), float(q[3])
+
+    # Rotate (1,0,0) by quaternion: v' = q * v * q^-1
+    # For unit vector (1,0,0), this simplifies to:
+    # x' = 1 - 2*(qy^2 + qz^2)
+    # y' = 2*(qx*qy + qz*qw)
+    # z' = 2*(qx*qz - qy*qw)
+    ax = 1.0 - 2.0*(qy*qy + qz*qz)
+    ay = 2.0*(qx*qy + qz*qw)
+    az = 2.0*(qx*qz - qy*qw)
+
+    # Normalize (should already be unit length, but just in case)
+    length = math.sqrt(ax*ax + ay*ay + az*az)
+    if length < 1e-6:
+        return (1.0, 0.0, 0.0)
+
+    return (ax/length, ay/length, az/length)
+
+
+def quat_to_euler_degrees(q: Tuple[float, float, float, float]) -> Tuple[float, float, float]:
+    """
+    Convert quaternion (x, y, z, w) to Euler angles in degrees.
+    Uses the same method as FBX SDK (XYZ rotation order).
+    """
+    x, y, z, w = q
+
+    # Normalize
+    norm = math.sqrt(x*x + y*y + z*z + w*w)
+    if norm < 1e-10:
+        return (0.0, 0.0, 0.0)
+    x, y, z, w = x/norm, y/norm, z/norm, w/norm
+
+    # Convert to Euler (XYZ order)
+    # Roll (X)
+    sinr_cosp = 2.0 * (w * x + y * z)
+    cosr_cosp = 1.0 - 2.0 * (x * x + y * y)
+    roll = math.atan2(sinr_cosp, cosr_cosp)
+
+    # Pitch (Y)
+    sinp = 2.0 * (w * y - z * x)
+    if abs(sinp) >= 1:
+        pitch = math.copysign(math.pi / 2, sinp)
+    else:
+        pitch = math.asin(sinp)
+
+    # Yaw (Z)
+    siny_cosp = 2.0 * (w * z + x * y)
+    cosy_cosp = 1.0 - 2.0 * (y * y + z * z)
+    yaw = math.atan2(siny_cosp, cosy_cosp)
+
+    return (math.degrees(roll), math.degrees(pitch), math.degrees(yaw))
+
+
+def euler_to_quat(rx: float, ry: float, rz: float) -> Tuple[float, float, float, float]:
+    """
+    Convert Euler angles (degrees, XYZ order) to quaternion (x, y, z, w).
+    """
+    # Convert to radians
+    rx = math.radians(rx)
+    ry = math.radians(ry)
+    rz = math.radians(rz)
+
+    # Half angles
+    cx = math.cos(rx / 2)
+    sx = math.sin(rx / 2)
+    cy = math.cos(ry / 2)
+    sy = math.sin(ry / 2)
+    cz = math.cos(rz / 2)
+    sz = math.sin(rz / 2)
+
+    # XYZ order
+    w = cx * cy * cz + sx * sy * sz
+    x = sx * cy * cz - cx * sy * sz
+    y = cx * sy * cz + sx * cy * sz
+    z = cx * cy * sz - sx * sy * cz
+
+    return (x, y, z, w)
+
+
+def get_lcl_rotation_at_time(node: fbx.FbxNode, t: fbx.FbxTime, layer: fbx.FbxAnimLayer = None) -> Tuple[float, float, float]:
+    """
+    Get the LclRotation property value at a given time.
+    This returns the raw rotation value WITHOUT PreRotation applied.
+    """
+    prop = node.LclRotation
+
+    if layer:
+        # Try to get from animation curves
+        curve_x = prop.GetCurve(layer, "X")
+        curve_y = prop.GetCurve(layer, "Y")
+        curve_z = prop.GetCurve(layer, "Z")
+
+        if curve_x and curve_y and curve_z:
+            rx = curve_x.Evaluate(t)
+            ry = curve_y.Evaluate(t)
+            rz = curve_z.Evaluate(t)
+            # Evaluate may return (value, lastIndex) tuple or just value
+            if isinstance(rx, tuple):
+                rx = rx[0]
+            if isinstance(ry, tuple):
+                ry = ry[0]
+            if isinstance(rz, tuple):
+                rz = rz[0]
+            return (float(rx), float(ry), float(rz))
+
+    # Fallback to static value
+    v = prop.Get()
+    return (float(v[0]), float(v[1]), float(v[2]))
+
+
+# ----------------------------
+# Utilities
+# ----------------------------
+
+def eprint(*args, **kwargs):
+    print(*args, file=sys.stderr, **kwargs)
+
+def iter_nodes_dfs(root: fbx.FbxNode):
+    stack = [root]
+    while stack:
+        n = stack.pop()
+        yield n
+        for i in range(n.GetChildCount() - 1, -1, -1):
+            stack.append(n.GetChild(i))
+
+def build_node_map(scene: fbx.FbxScene) -> Dict[str, fbx.FbxNode]:
+    m: Dict[str, fbx.FbxNode] = {}
+    root = scene.GetRootNode()
+    if not root:
+        return m
+    for n in iter_nodes_dfs(root):
+        name = n.GetName()
+        if name and name not in m:
+            m[name] = n
+    return m
+
+def find_first_anim_stack(scene: fbx.FbxScene) -> Optional[fbx.FbxAnimStack]:
+    crit = fbx.FbxCriteria.ObjectType(fbx.FbxAnimStack.ClassId)
+    count = scene.GetSrcObjectCount(crit)
+    if count <= 0:
+        return None
+    return scene.GetSrcObject(crit, 0)
+
+def find_anim_stack_by_name(scene: fbx.FbxScene, name: str) -> Optional[fbx.FbxAnimStack]:
+    crit = fbx.FbxCriteria.ObjectType(fbx.FbxAnimStack.ClassId)
+    count = scene.GetSrcObjectCount(crit)
+    for i in range(count):
+        s = scene.GetSrcObject(crit, i)
+        if s and s.GetName() == name:
+            return s
+    return None
+
+def set_current_stack(scene: fbx.FbxScene, stack: fbx.FbxAnimStack):
+    scene.SetCurrentAnimationStack(stack)
+
+def get_stack_time_span(stack: fbx.FbxAnimStack) -> Optional[fbx.FbxTimeSpan]:
+    try:
+        return stack.GetLocalTimeSpan()
+    except Exception:
+        return None
+
+def fbx_time_from_seconds(sec: float) -> fbx.FbxTime:
+    t = fbx.FbxTime()
+    t.SetSecondDouble(sec)
+    return t
+
+def matrix_inverse(m: fbx.FbxAMatrix) -> fbx.FbxAMatrix:
+    inv = fbx.FbxAMatrix(m)
+    inv = inv.Inverse()
+    return inv
+
+def extract_trs(m: fbx.FbxAMatrix):
+    # Translation, Rotation (Euler degrees), Scale
+    return m.GetT(), m.GetR(), m.GetS()
+
+def convert_source_to_target_space(source_scene: fbx.FbxScene, target_scene: fbx.FbxScene):
+    """
+    Convert source scene axis + units to match target scene.
+    This tends to make EvaluateGlobalTransform comparisons far more reliable.
+    """
+    tgt_axis = target_scene.GetGlobalSettings().GetAxisSystem()
+    tgt_unit = target_scene.GetGlobalSettings().GetSystemUnit()
+    tgt_axis.ConvertScene(source_scene)
+    tgt_unit.ConvertScene(source_scene)
+
+def ensure_anim_stack(scene: fbx.FbxScene, name: str) -> Tuple[fbx.FbxAnimStack, fbx.FbxAnimLayer]:
+    stack = fbx.FbxAnimStack.Create(scene, name)
+    layer = fbx.FbxAnimLayer.Create(scene, "BaseLayer")
+    stack.AddMember(layer)
+    return stack, layer
+
+def get_or_create_curve(prop: fbx.FbxProperty, layer: fbx.FbxAnimLayer, channel: str) -> fbx.FbxAnimCurve:
+    return prop.GetCurve(layer, channel, True)
+
+def begin_curve_edit(curves: List[fbx.FbxAnimCurve]):
+    for c in curves:
+        c.KeyModifyBegin()
+
+def end_curve_edit(curves: List[fbx.FbxAnimCurve]):
+    for c in curves:
+        c.KeyModifyEnd()
+
+def add_key(curve: fbx.FbxAnimCurve, t: fbx.FbxTime, value: float, fallback: float = 0.0) -> bool:
+    """
+    Add a keyframe to a curve. Returns True if a valid value was used, False if fallback was needed.
+    """
+    v = float(value)
+    used_fallback = False
+    if math.isnan(v) or math.isinf(v):
+        v = float(fallback)
+        used_fallback = True
+
+    idx = curve.KeyAdd(t)[0]
+    curve.KeySetValue(idx, v)  # BUG FIX: was using 'value' instead of sanitized 'v'
+
+    # Try to set cubic interpolation if the binding supports it.
+    # Different FBX SDK Python builds expose enums differently.
+    try:
+        # Newer/alternate bindings may expose EInterpolationType
+        itype = getattr(fbx.FbxAnimCurveDef, "EInterpolationType", None)
+        if itype is not None:
+            # Prefer cubic if present, else fallback to linear
+            cubic = getattr(itype, "eInterpolationCubic", None) or getattr(itype, "eCubic", None)
+            linear = getattr(itype, "eInterpolationLinear", None) or getattr(itype, "eLinear", None)
+            if cubic is not None:
+                curve.KeySetInterpolation(idx, cubic)
+            elif linear is not None:
+                curve.KeySetInterpolation(idx, linear)
+            return not used_fallback
+
+        # Older bindings (if they exist)
+        cubic = getattr(fbx.FbxAnimCurveDef, "eInterpolationCubic", None)
+        if cubic is not None:
+            curve.KeySetInterpolation(idx, cubic)
+            return not used_fallback
+
+    except Exception:
+        # If anything goes wrong, just leave the default interpolation
+        pass
+
+    return not used_fallback
+
+def identity_matrix() -> fbx.FbxAMatrix:
+    """
+    Create a guaranteed identity matrix.
+    FbxAMatrix() default constructor behavior varies by SDK version.
+    """
+    m = fbx.FbxAMatrix()
+    # Always set TRS explicitly to guarantee identity - don't rely on default constructor
+    m.SetT(fbx.FbxVector4(0.0, 0.0, 0.0, 0.0))
+    m.SetR(fbx.FbxVector4(0.0, 0.0, 0.0, 0.0))
+    m.SetS(fbx.FbxVector4(1.0, 1.0, 1.0, 0.0))
+    return m
+
+
+def copy_matrix(src: fbx.FbxAMatrix) -> fbx.FbxAMatrix:
+    """
+    Create a deep copy of a matrix. FbxAMatrix(src) copy constructor may not work in all bindings.
+    """
+    dst = fbx.FbxAMatrix()
+    dst.SetT(src.GetT())
+    dst.SetR(src.GetR())
+    dst.SetS(src.GetS())
+    return dst
+
+
+def matrix_multiply_safe(a: fbx.FbxAMatrix, b: fbx.FbxAMatrix, context: str = "") -> fbx.FbxAMatrix:
+    """
+    Safely multiply two matrices. Returns identity if inputs or result contain NaN.
+    """
+    if mat_has_nan(a):
+        if context:
+            eprint(f"[warn] matrix_multiply_safe: matrix A has NaN ({context})")
+        return identity_matrix()
+    if mat_has_nan(b):
+        if context:
+            eprint(f"[warn] matrix_multiply_safe: matrix B has NaN ({context})")
+        return identity_matrix()
+
+    result = a * b
+
+    if mat_has_nan(result):
+        if context:
+            eprint(f"[warn] matrix_multiply_safe: result has NaN ({context})")
+        return identity_matrix()
+
+    return result
+
+def parse_mapping_file(path: str) -> Dict[str, str]:
+    """
+    Supports:
+      1) JSON: {"mixamorig:Hips":"Hips", ...}
+         Also supports: {"bones": {...}}
+      2) Text lines: "mixamorig:Hips -> Hips" or "mixamorig:Hips → Hips" or "mixamorig:Hips = Hips"
+    Ignores blank lines and comments starting with # or //
+    """
+    if path.lower().endswith(".json"):
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, dict) and "bones" in data and isinstance(data["bones"], dict):
+            return {str(k): str(v) for k, v in data["bones"].items()}
+        if isinstance(data, dict):
+            return {str(k): str(v) for k, v in data.items()}
+        raise ValueError("JSON mapping must be an object/dict.")
+    mapping: Dict[str, str] = {}
+    arrow_re = re.compile(r"\s*(.*?)\s*(?:->|→|=)\s*(.*?)\s*$")
+    with open(path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#") or line.startswith("//"):
+                continue
+            m = arrow_re.match(line)
+            if not m:
+                raise ValueError(f"Could not parse mapping line: {line}")
+            src = m.group(1).strip()
+            tgt = m.group(2).strip()
+            mapping[src] = tgt
+    return mapping
+
+def get_target_hierarchy_order(target_hips: fbx.FbxNode) -> List[str]:
+    order: List[str] = []
+    for n in iter_nodes_dfs(target_hips):
+        order.append(n.GetName())
+    return order
+
+
+# ----------------------------
+# FBX load/save (no FbxCommon)
+# ----------------------------
+
+def create_manager_and_scene(scene_name: str) -> Tuple[fbx.FbxManager, fbx.FbxScene]:
+    mgr = fbx.FbxManager.Create()
+    ios = fbx.FbxIOSettings.Create(mgr, fbx.IOSROOT)
+    mgr.SetIOSettings(ios)
+    scene = fbx.FbxScene.Create(mgr, scene_name)
+    return mgr, scene
+
+def load_scene(mgr: fbx.FbxManager, scene: fbx.FbxScene, path: str):
+    importer = fbx.FbxImporter.Create(mgr, "")
+    if not importer.Initialize(path, -1, mgr.GetIOSettings()):
+        msg = importer.GetStatus().GetErrorString()
+        importer.Destroy()
+        raise RuntimeError(f"Failed to import FBX '{path}': {msg}")
+    if not importer.Import(scene):
+        msg = importer.GetStatus().GetErrorString()
+        importer.Destroy()
+        raise RuntimeError(f"Failed to import scene '{path}': {msg}")
+    importer.Destroy()
+
+def save_scene(mgr: fbx.FbxManager, scene: fbx.FbxScene, path: str):
+    exporter = fbx.FbxExporter.Create(mgr, "")
+    if not exporter.Initialize(path, -1, mgr.GetIOSettings()):
+        msg = exporter.GetStatus().GetErrorString()
+        exporter.Destroy()
+        raise RuntimeError(f"Failed to export FBX '{path}': {msg}")
+    if not exporter.Export(scene):
+        msg = exporter.GetStatus().GetErrorString()
+        exporter.Destroy()
+        raise RuntimeError(f"Failed to export scene '{path}': {msg}")
+    exporter.Destroy()
+
+
+# ----------------------------
+# Retarget logic
+# ----------------------------
+
+class RetargetConfig:
+    def __init__(
+        self,
+        fps: int,
+        rest_frame: int,
+        root_name: str,
+        hips_name: str,
+        source_hips_name: str,
+        anim_stack_name: Optional[str],
+        convert_space: bool,
+        root_motion_axes: str,
+        hips_translation_axes: str,
+        out_stack_name: str,
+        verbose: bool,
+        use_animated_rest: bool = False,
+        source_tpose_scene: Optional[fbx.FbxScene] = None
+    ):
+        self.fps = fps
+        self.rest_frame = rest_frame
+        self.root_name = root_name
+        self.hips_name = hips_name
+        self.source_hips_name = source_hips_name
+        self.anim_stack_name = anim_stack_name
+        self.convert_space = convert_space
+        self.root_motion_axes = (root_motion_axes or "").upper()
+        self.hips_translation_axes = (hips_translation_axes or "").upper()
+        self.out_stack_name = out_stack_name
+        self.verbose = verbose
+        self.use_animated_rest = use_animated_rest
+        self.source_tpose_scene = source_tpose_scene
+
+
+class RetargetStats:
+    """Track statistics and issues during retargeting for diagnostics."""
+
+    def __init__(self):
+        self.total_frames = 0
+        self.total_keys = 0
+        self.nan_fallbacks = 0
+        self.singular_matrices = 0
+        self.bones_with_issues: Dict[str, int] = {}
+
+    def record_nan_fallback(self, bone_name: str):
+        self.nan_fallbacks += 1
+        self.bones_with_issues[bone_name] = self.bones_with_issues.get(bone_name, 0) + 1
+
+    def record_singular(self, bone_name: str):
+        self.singular_matrices += 1
+        self.bones_with_issues[bone_name] = self.bones_with_issues.get(bone_name, 0) + 1
+
+    def report(self, verbose: bool):
+        eprint(f"[stats] Frames processed: {self.total_frames}")
+        eprint(f"[stats] Keys written: {self.total_keys}")
+        if self.nan_fallbacks > 0:
+            eprint(f"[stats] NaN fallbacks used: {self.nan_fallbacks}")
+        if self.singular_matrices > 0:
+            eprint(f"[stats] Singular matrix fallbacks: {self.singular_matrices}")
+        if verbose and self.bones_with_issues:
+            eprint(f"[stats] Bones with issues:")
+            for bone, count in sorted(self.bones_with_issues.items(), key=lambda x: -x[1]):
+                eprint(f"        {bone}: {count}")
+
+
+def validate_rest_matrices(
+    Srest: Dict[str, fbx.FbxAMatrix],
+    Trest: Dict[str, fbx.FbxAMatrix],
+    verbose: bool
+) -> bool:
+    """Validate that rest matrices are invertible and don't contain NaN."""
+    all_valid = True
+    for name, m in Srest.items():
+        if mat_has_nan(m):
+            eprint(f"[error] Source rest matrix for '{name}' contains NaN!")
+            all_valid = False
+        det = mat3x3_determinant(m)
+        if abs(det) < DETERMINANT_EPSILON:
+            eprint(f"[warn] Source rest matrix for '{name}' is near-singular (det={det:.2e})")
+            if verbose:
+                t, r, s = extract_trs(m)
+                eprint(f"        T=({t[0]:.3f}, {t[1]:.3f}, {t[2]:.3f}) "
+                       f"R=({r[0]:.1f}, {r[1]:.1f}, {r[2]:.1f}) "
+                       f"S=({s[0]:.3f}, {s[1]:.3f}, {s[2]:.3f})")
+
+    for name, m in Trest.items():
+        if mat_has_nan(m):
+            eprint(f"[error] Target rest matrix for '{name}' contains NaN!")
+            all_valid = False
+        det = mat3x3_determinant(m)
+        if abs(det) < DETERMINANT_EPSILON:
+            eprint(f"[warn] Target rest matrix for '{name}' is near-singular (det={det:.2e})")
+
+    return all_valid
+
+
+def retarget_mixamo_to_custom(
+    source_scene: fbx.FbxScene,
+    target_scene: fbx.FbxScene,
+    mapping: Dict[str, str],
+    cfg: RetargetConfig
+):
+    stats = RetargetStats()
+
+    if cfg.convert_space:
+        convert_source_to_target_space(source_scene, target_scene)
+
+    # Select source anim stack
+    if cfg.anim_stack_name:
+        src_stack = find_anim_stack_by_name(source_scene, cfg.anim_stack_name)
+        if not src_stack:
+            raise RuntimeError(f"Source AnimStack '{cfg.anim_stack_name}' not found.")
+    else:
+        src_stack = find_first_anim_stack(source_scene)
+
+    if not src_stack:
+        raise RuntimeError("No animation stack found in source scene.")
+
+    set_current_stack(source_scene, src_stack)
+
+    # Get source animation layer for reading LclRotation curves
+    src_layer = src_stack.GetMember(fbx.FbxAnimLayer.ClassId, 0) if src_stack.GetMemberCount(fbx.FbxAnimLayer.ClassId) > 0 else None
+
+    span = get_stack_time_span(src_stack)
+    if not span:
+        raise RuntimeError("Could not read source animation time span (LocalTimeSpan).")
+
+    start = span.GetStart()
+    end = span.GetStop()
+    start_sec = start.GetSecondDouble()
+    end_sec = end.GetSecondDouble()
+
+    if cfg.verbose:
+        eprint(f"[info] Source stack: '{src_stack.GetName()}' time: {start_sec:.3f}s -> {end_sec:.3f}s")
+
+    # Build node maps
+    src_nodes = build_node_map(source_scene)
+    tgt_nodes = build_node_map(target_scene)
+
+    # Required target nodes
+    tgt_root = tgt_nodes.get(cfg.root_name)
+    tgt_hips = tgt_nodes.get(cfg.hips_name)
+    if not tgt_root:
+        raise RuntimeError(f"Target Root node '{cfg.root_name}' not found.")
+    if not tgt_hips:
+        raise RuntimeError(f"Target Hips node '{cfg.hips_name}' not found.")
+
+    # Required source hips node
+    src_hips = src_nodes.get(cfg.source_hips_name) or src_nodes.get("mixamorig:Hips")
+    if not src_hips:
+        raise RuntimeError(f"Source hips node '{cfg.source_hips_name}' not found (and mixamorig:Hips not found).")
+
+    # Compute target order (Hips subtree) and filter to mapped targets
+    target_order = get_target_hierarchy_order(tgt_hips)
+    mapped_targets = set(mapping.values())
+    ordered_targets = [name for name in target_order if name in mapped_targets]
+
+    # Invert mapping for fast lookup by target bone
+    target_to_source: Dict[str, str] = {t: s for s, t in mapping.items()}
+
+    # Resolve valid node pairs in hierarchy order
+    pairs: List[Tuple[str, str]] = []
+    for tgt_name in ordered_targets:
+        src_name = target_to_source.get(tgt_name)
+        if not src_name:
+            continue
+        s_node = src_nodes.get(src_name)
+        t_node = tgt_nodes.get(tgt_name)
+        if not s_node or not t_node:
+            if cfg.verbose:
+                eprint(f"[warn] Missing node(s): source='{src_name}' exists={bool(s_node)} "
+                       f"target='{tgt_name}' exists={bool(t_node)} -> skipping")
+            continue
+        pairs.append((src_name, tgt_name))
+
+    if not pairs:
+        raise RuntimeError("No valid bone pairs to retarget (after resolving nodes).")
+
+    if cfg.verbose:
+        eprint(f"[info] Retarget pairs: {len(pairs)}")
+        for src_name, tgt_name in pairs:
+            eprint(f"        {src_name} -> {tgt_name}")
+
+    # Rest time from rest-frame & fps
+    rest_time = fbx_time_from_seconds(cfg.rest_frame / float(cfg.fps))
+
+    # Precompute rest poses
+    Srest_local: Dict[str, RestPose] = {}  # Source LOCAL rest poses (for translation)
+    Trest_local: Dict[str, RestPose] = {}  # Target LOCAL rest poses (for translation)
+    Srest_global: Dict[str, RestPose] = {}  # Source GLOBAL rest
+    Trest_global: Dict[str, RestPose] = {}  # Target GLOBAL rest poses
+
+    # Orientation offset: maps source bone orientation to target bone orientation
+    # offset = Qtgt_rest * inv(Qsrc_rest), used to transform rotation deltas
+    orientation_offset: Dict[str, Tuple[float, float, float, float]] = {}
+
+    # Bone twist axis in rest pose (normalized direction to first child)
+    # Used for swing-twist decomposition to handle different bone rolls
+    src_bone_axis: Dict[str, Tuple[float, float, float]] = {}
+    tgt_bone_axis: Dict[str, Tuple[float, float, float]] = {}
+
+    tgt_scene_root = target_scene.GetRootNode()
+    src_scene_root = source_scene.GetRootNode()
+
+    # Determine source for rest pose: either separate T-pose file or source scene
+    if cfg.source_tpose_scene:
+        src_tpose_nodes = build_node_map(cfg.source_tpose_scene)
+        src_tpose_root = cfg.source_tpose_scene.GetRootNode()
+        # Set animation stack on T-pose scene if it has one
+        crit = fbx.FbxCriteria.ObjectType(fbx.FbxAnimStack.ClassId)
+        if cfg.source_tpose_scene.GetSrcObjectCount(crit) > 0:
+            tpose_stack = cfg.source_tpose_scene.GetSrcObject(crit, 0)
+            cfg.source_tpose_scene.SetCurrentAnimationStack(tpose_stack)
+        if cfg.verbose:
+            eprint(f"[info] Using SEPARATE T-pose file for source rest pose")
+    else:
+        src_tpose_nodes = None
+        src_tpose_root = None
+
+    if cfg.verbose:
+        if cfg.use_animated_rest:
+            eprint(f"[info] Using ANIMATED rest pose for target (EvaluateTransform at frame {cfg.rest_frame})")
+        else:
+            eprint(f"[info] Using BIND pose for target (static node properties)")
+
+    for src_name, tgt_name in pairs:
+        s_node = src_nodes[src_name]
+        t_node = tgt_nodes[tgt_name]
+
+        # Source rest pose: use T-pose file if provided, otherwise static bind pose
+        if src_tpose_nodes and src_name in src_tpose_nodes:
+            # Use EvaluateGlobalTransform from T-pose file at frame 0
+            tpose_node = src_tpose_nodes[src_name]
+            tpose_local = tpose_node.EvaluateLocalTransform(rest_time)
+            tpose_global = tpose_node.EvaluateGlobalTransform(rest_time)
+            Srest_local[src_name] = RestPose(tpose_local)
+            Srest_global[src_name] = RestPose(tpose_global)
+        else:
+            # Fallback to static bind pose (from node properties with PreRotation)
+            Srest_local[src_name] = RestPose.from_node_properties(s_node)
+            Srest_global[src_name] = RestPose.from_node_global_bind(s_node, src_scene_root)
+
+        # Target rest pose - either from animation or static bind pose
+        if cfg.use_animated_rest:
+            t_local_mat = t_node.EvaluateLocalTransform(rest_time)
+            Trest_local[tgt_name] = RestPose(t_local_mat)
+
+            t_global_mat = safe_evaluate_global(
+                t_node, rest_time,
+                f"target rest '{tgt_name}'" if cfg.verbose else ""
+            )
+            Trest_global[tgt_name] = RestPose(t_global_mat)
+        else:
+            Trest_local[tgt_name] = RestPose.from_node_properties(t_node)
+            Trest_global[tgt_name] = RestPose.from_node_global_bind(t_node, tgt_scene_root)
+
+        # Compute orientation offset: offset = Qtgt_rest * inv(Qsrc_rest)
+        # This offset transforms rotation deltas from source orientation to target orientation
+        src_qx, src_qy, src_qz, src_qw = Srest_global[src_name].get_quaternion()
+        tgt_qx, tgt_qy, tgt_qz, tgt_qw = Trest_global[tgt_name].get_quaternion()
+
+        # inv(Qsrc)
+        src_inv_x, src_inv_y, src_inv_z, src_inv_w = -src_qx, -src_qy, -src_qz, src_qw
+
+        # offset = Qtgt * inv(Qsrc)
+        off_w = tgt_qw*src_inv_w - tgt_qx*src_inv_x - tgt_qy*src_inv_y - tgt_qz*src_inv_z
+        off_x = tgt_qw*src_inv_x + tgt_qx*src_inv_w + tgt_qy*src_inv_z - tgt_qz*src_inv_y
+        off_y = tgt_qw*src_inv_y - tgt_qx*src_inv_z + tgt_qy*src_inv_w + tgt_qz*src_inv_x
+        off_z = tgt_qw*src_inv_z + tgt_qx*src_inv_y - tgt_qy*src_inv_x + tgt_qz*src_inv_w
+
+        orientation_offset[src_name] = (off_x, off_y, off_z, off_w)
+
+        # Compute bone twist axes (direction to child) for swing-twist decomposition
+        # For hand bones, use middle finger direction instead of thumb
+        is_hand = "Hand" in src_name and not any(x in src_name for x in ["Thumb", "Index", "Middle", "Ring", "Pinky"])
+
+        if src_tpose_nodes and src_name in src_tpose_nodes:
+            src_dir = get_bone_direction(src_tpose_nodes[src_name], rest_time, prefer_middle_finger=is_hand)
+        else:
+            src_dir = get_bone_direction(s_node, rest_time, prefer_middle_finger=is_hand)
+
+        tgt_dir = get_bone_direction(t_node, rest_time, prefer_middle_finger=is_hand)
+
+        if src_dir:
+            src_bone_axis[src_name] = src_dir
+        if tgt_dir:
+            tgt_bone_axis[tgt_name] = tgt_dir
+
+    # Source hips rest (for root motion)
+    if src_tpose_nodes and cfg.source_hips_name in src_tpose_nodes:
+        tpose_hips = src_tpose_nodes[cfg.source_hips_name]
+        Srest_hips = RestPose(tpose_hips.EvaluateGlobalTransform(rest_time))
+    else:
+        Srest_hips = RestPose.from_node_global_bind(src_hips, src_scene_root)
+
+    # Target root/hips rest pose
+    if cfg.use_animated_rest:
+        Trest_root = RestPose(safe_evaluate_global(tgt_root, rest_time))
+        tgt_hips_for_scale = RestPose(safe_evaluate_global(tgt_hips, rest_time))
+    else:
+        Trest_root = RestPose.from_node_global_bind(tgt_root, tgt_scene_root)
+        tgt_hips_for_scale = RestPose.from_node_global_bind(tgt_hips, tgt_scene_root)
+
+    if cfg.verbose:
+        eprint(f"[info] Target Hips rest pose Y: {tgt_hips_for_scale.ty:.4f}")
+
+    # Validate rest poses
+    if cfg.verbose:
+        # Convert back to matrices for validation (temporary)
+        Srest_mats = {k: v.to_matrix() for k, v in Srest_global.items()}
+        Trest_mats = {k: v.to_matrix() for k, v in Trest_global.items()}
+        validate_rest_matrices(Srest_mats, Trest_mats, cfg.verbose)
+
+    # Compute scale ratio from actual bone positions, not matrix scale component
+    # The matrix scale is often 1.0 even when skeletons have very different sizes
+    # Use hip height (Y translation) as the reference for skeleton size
+    src_hips_y = abs(Srest_hips.ty)
+    tgt_hips_y = abs(tgt_hips_for_scale.ty)
+
+    if src_hips_y < 1e-6:
+        eprint(f"[warn] Source hips Y is near-zero ({src_hips_y:.6f}), using 100.0")
+        src_hips_y = 100.0
+    if tgt_hips_y < 1e-6:
+        eprint(f"[warn] Target hips Y is near-zero ({tgt_hips_y:.6f}), using 1.0")
+        tgt_hips_y = 1.0
+
+    scale_ratio = tgt_hips_y / src_hips_y
+    if cfg.verbose:
+        eprint(f"[info] Scale ratio: {scale_ratio:.6f} (src_hips_y={src_hips_y:.2f}, tgt_hips_y={tgt_hips_y:.2f})")
+
+    # Remove existing animation stacks from target to avoid confusion
+    # (the output should only have our retargeted animation)
+    crit = fbx.FbxCriteria.ObjectType(fbx.FbxAnimStack.ClassId)
+    existing_stacks = []
+    for i in range(target_scene.GetSrcObjectCount(crit)):
+        existing_stacks.append(target_scene.GetSrcObject(crit, i))
+    for stack in existing_stacks:
+        if cfg.verbose:
+            eprint(f"[info] Removing existing animation stack: '{stack.GetName()}'")
+        target_scene.RemoveMember(stack)
+        stack.Destroy()
+
+    # Create a new anim stack on target
+    out_stack, out_layer = ensure_anim_stack(target_scene, cfg.out_stack_name)
+    set_current_stack(target_scene, out_stack)
+
+    # Set output stack time span to match source animation duration
+    out_stack.SetLocalTimeSpan(span)
+    if cfg.verbose:
+        eprint(f"[info] Output stack time span set to {start_sec:.3f}s -> {end_sec:.3f}s")
+
+    # Curve cache: target bone name -> (rx,ry,rz, tx,ty,tz)
+    curve_cache: Dict[str, Tuple[fbx.FbxAnimCurve, ...]] = {}
+    all_curves: List[fbx.FbxAnimCurve] = []
+
+    def curves_for_node(node: fbx.FbxNode):
+        rot = node.LclRotation
+        trn = node.LclTranslation
+        rx = get_or_create_curve(rot, out_layer, "X")
+        ry = get_or_create_curve(rot, out_layer, "Y")
+        rz = get_or_create_curve(rot, out_layer, "Z")
+        tx = get_or_create_curve(trn, out_layer, "X")
+        ty = get_or_create_curve(trn, out_layer, "Y")
+        tz = get_or_create_curve(trn, out_layer, "Z")
+        return rx, ry, rz, tx, ty, tz
+
+    # Create curves for mapped targets
+    for _, tgt_name in pairs:
+        node = tgt_nodes[tgt_name]
+        curves = curves_for_node(node)
+        curve_cache[tgt_name] = curves
+        all_curves.extend(list(curves))
+
+    # Create curves for Root (special-case translation)
+    curve_cache[cfg.root_name] = curves_for_node(tgt_root)
+    all_curves.extend(list(curve_cache[cfg.root_name]))
+
+    begin_curve_edit(all_curves)
+
+    def root_axis(axis: str) -> bool:
+        return axis in cfg.root_motion_axes
+
+    def hips_axis(axis: str) -> bool:
+        return axis in cfg.hips_translation_axes
+
+    # Main sampling loop
+    dt = 1.0 / float(cfg.fps)
+    frame = 0
+    t = fbx_time_from_seconds(start_sec)
+
+    # Helper for sanitizing floats
+    def sanitize_float(val: float, default: float = 0.0) -> float:
+        if math.isnan(val) or math.isinf(val):
+            return default
+        return val
+
+    # Track which bones we've logged swing-twist info for (to avoid spam)
+    swing_twist_logged: Set[str] = set()
+
+    while t.GetSecondDouble() <= end_sec + 1e-9:
+        stats.total_frames += 1
+
+        # Desired globals for this frame (for parent computations)
+        desired_global: Dict[str, fbx.FbxAMatrix] = {}
+
+        # --- Root motion derived from source hips ---
+        # Use SCALE-INVARIANT approach: extract translation delta separately and scale it
+        Sg_hips = safe_evaluate_global(src_hips, t)
+
+        # Translation delta: (Sg_hips.T - Srest_hips.T) but we need to account for scale
+        # Source translations are in source scale, we need to convert to target scale
+        src_hips_t = Sg_hips.GetT()
+        # Use stored rest pose values (extracted earlier to avoid FBX caching issues)
+        src_hips_rest_tx, src_hips_rest_ty, src_hips_rest_tz = Srest_hips.get_translation()
+
+        # Raw translation delta in source units
+        delta_tx = float(src_hips_t[0]) - src_hips_rest_tx
+        delta_ty = float(src_hips_t[1]) - src_hips_rest_ty
+        delta_tz = float(src_hips_t[2]) - src_hips_rest_tz
+
+        # Scale conversion: source_scale -> target_scale
+        # Scale the delta to target space
+        scaled_delta_tx = delta_tx * scale_ratio
+        scaled_delta_ty = delta_ty * scale_ratio
+        scaled_delta_tz = delta_tz * scale_ratio
+
+        # Build root global transform using stored rest pose
+        root_global = Trest_root.to_matrix()
+        tgt_root_rest_tx, tgt_root_rest_ty, tgt_root_rest_tz = Trest_root.get_translation()
+
+        x = sanitize_float(tgt_root_rest_tx) + sanitize_float(scaled_delta_tx) if root_axis("X") else sanitize_float(tgt_root_rest_tx)
+        y = sanitize_float(tgt_root_rest_ty) + sanitize_float(scaled_delta_ty) if root_axis("Y") else sanitize_float(tgt_root_rest_ty)
+        z = sanitize_float(tgt_root_rest_tz) + sanitize_float(scaled_delta_tz) if root_axis("Z") else sanitize_float(tgt_root_rest_tz)
+
+        root_global.SetT(fbx.FbxVector4(x, y, z, 0.0))
+
+        # Store root global for children
+        desired_global[cfg.root_name] = root_global
+
+        # Assume Root parent is scene root -> local == global (common)
+        root_local = root_global
+
+        # Use safe euler extraction
+        rT = root_local.GetT()
+        rR = matrix_to_local_euler_safe(root_local)
+
+        rx, ry, rz, tx, ty, tz = curve_cache[cfg.root_name]
+        # We key rotation too (usually zero); harmless
+        if not add_key(rx, t, rR[0]):
+            stats.record_nan_fallback(cfg.root_name)
+        if not add_key(ry, t, rR[1]):
+            stats.record_nan_fallback(cfg.root_name)
+        if not add_key(rz, t, rR[2]):
+            stats.record_nan_fallback(cfg.root_name)
+        stats.total_keys += 3
+
+        if root_axis("X"):
+            if not add_key(tx, t, rT[0]):
+                stats.record_nan_fallback(cfg.root_name)
+            stats.total_keys += 1
+        if root_axis("Y"):
+            if not add_key(ty, t, rT[1]):
+                stats.record_nan_fallback(cfg.root_name)
+            stats.total_keys += 1
+        if root_axis("Z"):
+            if not add_key(tz, t, rT[2]):
+                stats.record_nan_fallback(cfg.root_name)
+            stats.total_keys += 1
+
+        # --- Retarget mapped bones in target hierarchy order ---
+        # Using GLOBAL rotation delta with orientation offset:
+        # 1. Compute source GLOBAL rotation delta: delta = Qg_current * inv(Qg_rest)
+        # 2. Transform delta to target space: delta_tgt = offset * delta * inv(offset)
+        # 3. Apply to target GLOBAL rest: Qg_desired = delta_tgt * Qg_target_rest
+        # 4. Convert back to LOCAL for output
+        for tgt_name in ordered_targets:
+            src_name = target_to_source.get(tgt_name)
+            if not src_name:
+                continue
+
+            # Only proceed if we built curves for this tgt (i.e. it's in pairs)
+            if tgt_name not in curve_cache:
+                continue
+            if src_name not in Srest_global or tgt_name not in Trest_global:
+                continue
+            if src_name not in orientation_offset:
+                continue
+
+            s_node = src_nodes[src_name]
+            t_node = tgt_nodes[tgt_name]
+
+            # Get source GLOBAL rotation at current time
+            Sg = safe_evaluate_global(s_node, t)
+            Qg_src = Sg.GetQ()
+            qgx, qgy, qgz, qgw = float(Qg_src[0]), float(Qg_src[1]), float(Qg_src[2]), float(Qg_src[3])
+
+            # Get source GLOBAL rest quaternion
+            src_rest_gx, src_rest_gy, src_rest_gz, src_rest_gw = Srest_global[src_name].get_quaternion()
+
+            # Compute GLOBAL rotation delta: delta = Qg_current * inv(Qg_rest)
+            src_inv_x, src_inv_y, src_inv_z, src_inv_w = -src_rest_gx, -src_rest_gy, -src_rest_gz, src_rest_gw
+
+            dw = qgw*src_inv_w - qgx*src_inv_x - qgy*src_inv_y - qgz*src_inv_z
+            dx = qgw*src_inv_x + qgx*src_inv_w + qgy*src_inv_z - qgz*src_inv_y
+            dy = qgw*src_inv_y - qgx*src_inv_z + qgy*src_inv_w + qgz*src_inv_x
+            dz = qgw*src_inv_z + qgx*src_inv_y - qgy*src_inv_x + qgz*src_inv_w
+
+            delta = (dx, dy, dz, dw)
+
+            # For bones with twist axis info, use swing-twist decomposition
+            # This handles different bone rolls between skeletons
+            use_swing_only = False
+
+            if src_name in src_bone_axis and tgt_name in tgt_bone_axis:
+                src_axis = src_bone_axis[src_name]
+                tgt_axis = tgt_bone_axis[tgt_name]
+
+                # Check the orientation offset magnitude - if it's large (>30°), use swing-twist
+                # This handles cases where bones point the same direction but have different rolls
+                off_x, off_y, off_z, off_w = orientation_offset[src_name]
+                offset_angle = 2 * math.acos(min(1.0, abs(off_w))) * 180 / math.pi
+
+                # Use swing-twist if orientation offset is significant (different bone rolls)
+                if offset_angle > 30:
+                    # The offset represents the difference between source and target rest orientations.
+                    # When bones have different rolls (twist around bone axis), we want to remove
+                    # that roll difference from the offset, but keep the full delta (including any
+                    # intentional twist in the animation).
+                    #
+                    # Decompose the OFFSET into swing and twist, use only swing part of offset
+                    offset_quat = (off_x, off_y, off_z, off_w)
+                    offset_swing, offset_twist = swing_twist_decompose(offset_quat, src_axis)
+
+                    # Replace full offset with swing-only offset for this bone
+                    off_x, off_y, off_z, off_w = offset_swing
+                    use_swing_only = True  # Flag to use modified offset
+
+                    if cfg.verbose and src_name not in swing_twist_logged:
+                        twist_angle = 2 * math.acos(min(1.0, abs(offset_twist[3]))) * 180 / math.pi
+                        eprint(f"[info] Swing-twist for {src_name}: offset_angle={offset_angle:.1f}°, removed twist={twist_angle:.1f}°")
+                        swing_twist_logged.add(src_name)
+
+            # Get orientation offset for this bone (may have been modified above for swing-only)
+            if not use_swing_only:
+                off_x, off_y, off_z, off_w = orientation_offset[src_name]
+
+            dx, dy, dz, dw = delta
+
+            # Transform delta to target space: delta_tgt = offset * delta * inv(offset)
+            # For swing-only bones, off_x/y/z/w contains swing-only offset (twist removed)
+            # First: temp = offset * delta
+            temp_w = off_w*dw - off_x*dx - off_y*dy - off_z*dz
+            temp_x = off_w*dx + off_x*dw + off_y*dz - off_z*dy
+            temp_y = off_w*dy - off_x*dz + off_y*dw + off_z*dx
+            temp_z = off_w*dz + off_x*dy - off_y*dx + off_z*dw
+
+            # inv(offset)
+            off_inv_x, off_inv_y, off_inv_z, off_inv_w = -off_x, -off_y, -off_z, off_w
+
+            # delta_tgt = temp * inv(offset)
+            dtgt_w = temp_w*off_inv_w - temp_x*off_inv_x - temp_y*off_inv_y - temp_z*off_inv_z
+            dtgt_x = temp_w*off_inv_x + temp_x*off_inv_w + temp_y*off_inv_z - temp_z*off_inv_y
+            dtgt_y = temp_w*off_inv_y - temp_x*off_inv_z + temp_y*off_inv_w + temp_z*off_inv_x
+            dtgt_z = temp_w*off_inv_z + temp_x*off_inv_y - temp_y*off_inv_x + temp_z*off_inv_w
+
+            # Get target GLOBAL rest quaternion
+            tgt_rest_gx, tgt_rest_gy, tgt_rest_gz, tgt_rest_gw = Trest_global[tgt_name].get_quaternion()
+
+            # Apply transformed delta to target GLOBAL rest: Qg_desired = delta_tgt * Qg_target_rest
+            desired_gw = dtgt_w*tgt_rest_gw - dtgt_x*tgt_rest_gx - dtgt_y*tgt_rest_gy - dtgt_z*tgt_rest_gz
+            desired_gx = dtgt_w*tgt_rest_gx + dtgt_x*tgt_rest_gw + dtgt_y*tgt_rest_gz - dtgt_z*tgt_rest_gy
+            desired_gy = dtgt_w*tgt_rest_gy - dtgt_x*tgt_rest_gz + dtgt_y*tgt_rest_gw + dtgt_z*tgt_rest_gx
+            desired_gz = dtgt_w*tgt_rest_gz + dtgt_x*tgt_rest_gy - dtgt_y*tgt_rest_gx + dtgt_z*tgt_rest_gw
+
+            # Convert desired GLOBAL rotation to LOCAL for the target
+            # Qlocal = inv(Qparent_global) * Qglobal_desired
+            t_parent = t_node.GetParent()
+            if t_parent and t_parent.GetName() in desired_global:
+                # Use parent's desired global from this frame
+                parent_global = desired_global[t_parent.GetName()]
+                Qp = parent_global.GetQ()
+                qpx, qpy, qpz, qpw = float(Qp[0]), float(Qp[1]), float(Qp[2]), float(Qp[3])
+            elif t_parent and t_parent.GetName() in Trest_global:
+                # Parent not animated yet, use rest pose
+                qpx, qpy, qpz, qpw = Trest_global[t_parent.GetName()].get_quaternion()
+            else:
+                # No parent or scene root - local = global
+                qpx, qpy, qpz, qpw = 0.0, 0.0, 0.0, 1.0
+
+            # inv(Qparent)
+            qpinv_x, qpinv_y, qpinv_z, qpinv_w = -qpx, -qpy, -qpz, qpw
+
+            # Qlocal = inv(Qparent) * Qglobal_desired
+            local_w = qpinv_w*desired_gw - qpinv_x*desired_gx - qpinv_y*desired_gy - qpinv_z*desired_gz
+            local_x = qpinv_w*desired_gx + qpinv_x*desired_gw + qpinv_y*desired_gz - qpinv_z*desired_gy
+            local_y = qpinv_w*desired_gy - qpinv_x*desired_gz + qpinv_y*desired_gw + qpinv_z*desired_gx
+            local_z = qpinv_w*desired_gz + qpinv_x*desired_gy - qpinv_y*desired_gx + qpinv_z*desired_gw
+
+            # Convert local quaternion to Euler for LclRotation curves
+            rot = quat_to_euler_degrees((local_x, local_y, local_z, local_w))
+
+            # Store desired global for children
+            desired_global_mat = fbx.FbxAMatrix()
+            desired_global_mat.SetQ(fbx.FbxQuaternion(desired_gx, desired_gy, desired_gz, desired_gw))
+            tgt_rest_tx, tgt_rest_ty, tgt_rest_tz = Trest_global[tgt_name].get_translation()
+            desired_global_mat.SetT(fbx.FbxVector4(tgt_rest_tx, tgt_rest_ty, tgt_rest_tz, 0.0))
+            desired_global[tgt_name] = desired_global_mat
+
+            rx, ry, rz, tx, ty, tz = curve_cache[tgt_name]
+
+            # Rotation always
+            if not add_key(rx, t, rot[0]):
+                stats.record_nan_fallback(tgt_name)
+            if not add_key(ry, t, rot[1]):
+                stats.record_nan_fallback(tgt_name)
+            if not add_key(rz, t, rot[2]):
+                stats.record_nan_fallback(tgt_name)
+            stats.total_keys += 3
+
+            # Translation policy: only Hips (optional axes)
+            if tgt_name == cfg.hips_name:
+                # Get source local translation at current time
+                Sl = s_node.EvaluateLocalTransform(t)
+                Sl_t = Sl.GetT()
+                tcx, tcy, tcz = float(Sl_t[0]), float(Sl_t[1]), float(Sl_t[2])
+
+                src_rest_tx, src_rest_ty, src_rest_tz = Srest_local[src_name].get_translation()
+                tgt_rest_tx, tgt_rest_ty, tgt_rest_tz = Trest_local[tgt_name].get_translation()
+
+                # Delta in source local space, scaled to target
+                delta_tx = (tcx - src_rest_tx) * scale_ratio
+                delta_ty = (tcy - src_rest_ty) * scale_ratio
+                delta_tz = (tcz - src_rest_tz) * scale_ratio
+
+                if hips_axis("X"):
+                    val = sanitize_float(tgt_rest_tx + delta_tx)
+                    if not add_key(tx, t, val):
+                        stats.record_nan_fallback(tgt_name)
+                    stats.total_keys += 1
+                if hips_axis("Y"):
+                    val = sanitize_float(tgt_rest_ty + delta_ty)
+                    if not add_key(ty, t, val):
+                        stats.record_nan_fallback(tgt_name)
+                    stats.total_keys += 1
+                if hips_axis("Z"):
+                    val = sanitize_float(tgt_rest_tz + delta_tz)
+                    if not add_key(tz, t, val):
+                        stats.record_nan_fallback(tgt_name)
+                    stats.total_keys += 1
+
+        # advance time
+        frame += 1
+        t = fbx_time_from_seconds(start_sec + frame * dt)
+
+    end_curve_edit(all_curves)
+
+    # Report statistics
+    if cfg.verbose:
+        stats.report(cfg.verbose)
+
+
+# ----------------------------
+# CLI
+# ----------------------------
+
+def list_skeleton_bones(scene: fbx.FbxScene, label: str):
+    """Print all skeleton bones in a scene for debugging."""
+    eprint(f"\n[{label}] Skeleton bones:")
+    node_map = build_node_map(scene)
+
+    def get_depth(node: fbx.FbxNode) -> int:
+        depth = 0
+        p = node.GetParent()
+        while p:
+            depth += 1
+            p = p.GetParent()
+        return depth
+
+    # Find bones (nodes with skeleton attribute or that look like bones)
+    bones = []
+    for name, node in node_map.items():
+        attr = node.GetNodeAttribute()
+        is_skeleton = attr and attr.GetAttributeType() == fbx.FbxNodeAttribute.EType.eSkeleton
+        # Also include nodes that might be bones (common naming)
+        if is_skeleton or any(kw in name.lower() for kw in ['hips', 'spine', 'arm', 'leg', 'hand', 'foot', 'head', 'neck', 'root', 'pelvis']):
+            bones.append((get_depth(node), name, node))
+
+    bones.sort(key=lambda x: (x[0], x[1]))
+    for depth, name, node in bones:
+        indent = "  " * depth
+        parent = node.GetParent()
+        parent_name = parent.GetName() if parent else "(root)"
+        eprint(f"  {indent}{name} <- {parent_name}")
+
+
+def dump_matrix(m: fbx.FbxAMatrix, label: str):
+    """Debug dump of a matrix."""
+    t = m.GetT()
+    q = m.GetQ()
+    s = m.GetS()
+    det = mat3x3_determinant(m)
+    eprint(f"  {label}:")
+    eprint(f"    T: ({t[0]:.4f}, {t[1]:.4f}, {t[2]:.4f})")
+    eprint(f"    Q: ({q[0]:.4f}, {q[1]:.4f}, {q[2]:.4f}, {q[3]:.4f})")
+    eprint(f"    S: ({s[0]:.4f}, {s[1]:.4f}, {s[2]:.4f})")
+    eprint(f"    det: {det:.6e}")
+    if mat_has_nan(m):
+        eprint(f"    WARNING: Contains NaN!")
+
+
+def debug_frame_dump(
+    source_scene: fbx.FbxScene,
+    target_scene: fbx.FbxScene,
+    mapping: Dict[str, str],
+    frame: int,
+    fps: int,
+    source_hips_name: str
+):
+    """Dump detailed debug info for a specific frame using LOCAL rotation delta method."""
+    # Set animation stack on source scene (critical for animation evaluation!)
+    crit = fbx.FbxCriteria.ObjectType(fbx.FbxAnimStack.ClassId)
+    src_stack = source_scene.GetSrcObject(crit, 0)
+    if src_stack:
+        source_scene.SetCurrentAnimationStack(src_stack)
+        span = src_stack.GetLocalTimeSpan()
+        start_sec = span.GetStart().GetSecondDouble()
+        eprint(f"[info] Animation stack: '{src_stack.GetName()}' start={start_sec:.3f}s")
+    else:
+        start_sec = 0.0
+        eprint(f"[warn] No animation stack found in source!")
+
+    src_nodes = build_node_map(source_scene)
+    tgt_nodes = build_node_map(target_scene)
+
+    t = fbx_time_from_seconds(start_sec + frame / float(fps))
+    rest_time = fbx_time_from_seconds(0)
+
+    eprint(f"\n=== DEBUG FRAME {frame} (t={start_sec + frame/float(fps):.4f}s) ===")
+    eprint(f"=== Using LOCAL rotation delta method ===\n")
+
+    # Show a few key bones with full LOCAL transform debug
+    target_to_source = {t: s for s, t in mapping.items()}
+    debug_bones = ["Hips", "UpperLeg_L", "LowerLeg_L", "Shoulder_L", "Elbow_L"]
+
+    for tgt_name in debug_bones:
+        src_name = target_to_source.get(tgt_name)
+        if not src_name:
+            continue
+        s_node = src_nodes.get(src_name)
+        t_node = tgt_nodes.get(tgt_name)
+        if not s_node or not t_node:
+            continue
+
+        eprint(f"=== Bone: {src_name} -> {tgt_name} ===")
+
+        # Source LOCAL transforms - MUST extract values immediately due to FBX SDK caching!
+        Sl_rest = s_node.EvaluateLocalTransform(rest_time)
+        src_rest_pose = RestPose(Sl_rest)  # Extract immediately!
+
+        Sl_frame = s_node.EvaluateLocalTransform(t)
+        src_frame_pose = RestPose(Sl_frame)  # Extract immediately!
+
+        # Target LOCAL rest transform
+        Tl_rest = t_node.EvaluateLocalTransform(rest_time)
+        tgt_rest_pose = RestPose(Tl_rest)  # Extract immediately!
+
+        eprint(f"  Source LOCAL rest:")
+        eprint(f"    T: ({src_rest_pose.tx:.4f}, {src_rest_pose.ty:.4f}, {src_rest_pose.tz:.4f})")
+        eprint(f"    Q: ({src_rest_pose.qx:.4f}, {src_rest_pose.qy:.4f}, {src_rest_pose.qz:.4f}, {src_rest_pose.qw:.4f})")
+
+        eprint(f"  Source LOCAL frame {frame}:")
+        eprint(f"    T: ({src_frame_pose.tx:.4f}, {src_frame_pose.ty:.4f}, {src_frame_pose.tz:.4f})")
+        eprint(f"    Q: ({src_frame_pose.qx:.4f}, {src_frame_pose.qy:.4f}, {src_frame_pose.qz:.4f}, {src_frame_pose.qw:.4f})")
+
+        eprint(f"  Target LOCAL rest:")
+        eprint(f"    T: ({tgt_rest_pose.tx:.4f}, {tgt_rest_pose.ty:.4f}, {tgt_rest_pose.tz:.4f})")
+        eprint(f"    Q: ({tgt_rest_pose.qx:.4f}, {tgt_rest_pose.qy:.4f}, {tgt_rest_pose.qz:.4f}, {tgt_rest_pose.qw:.4f})")
+
+        # Compute LOCAL rotation delta using stored RestPose values
+        qdelta = compute_local_rotation_delta(Sl_frame, src_rest_pose)
+        eprint(f"  Rotation delta (Qframe * inv(Qrest)):")
+        eprint(f"    Qdelta: ({qdelta[0]:.4f}, {qdelta[1]:.4f}, {qdelta[2]:.4f}, {qdelta[3]:.4f})")
+
+        # Apply to target
+        tgt_rest_pose = RestPose(Tl_rest)
+        qresult = apply_local_rotation_delta(qdelta, tgt_rest_pose)
+        eprint(f"  Result (Qdelta * Qtarget_rest):")
+        eprint(f"    Qresult: ({qresult[0]:.4f}, {qresult[1]:.4f}, {qresult[2]:.4f}, {qresult[3]:.4f})")
+
+        # Convert to Euler
+        euler = quat_to_euler_degrees(qresult)
+        eprint(f"  Output Euler: ({euler[0]:.2f}, {euler[1]:.2f}, {euler[2]:.2f})")
+
+        eprint("")
+
+
+def main():
+    ap = argparse.ArgumentParser(
+        description="Retarget Mixamo animation FBX onto a custom rig FBX using FBX Python SDK (no FbxCommon)."
+    )
+    ap.add_argument("--source", required=True, help="Mixamo animation FBX (source).")
+    ap.add_argument("--source-tpose", required=True, help="Mixamo T-pose FBX (source skeleton reference pose).")
+    ap.add_argument("--target-tpose", required=True, help="Custom rig T-pose FBX (target skeleton reference pose).")
+    ap.add_argument("--map", required=True, help="Mapping file (.json or text with '->'/'→'/'=').")
+    ap.add_argument("--out", required=True, help="Output FBX path (target with new animation).")
+
+    ap.add_argument("--fps", type=int, default=30, help="Sampling FPS for baking (default: 30).")
+    ap.add_argument("--rest-frame", type=int, default=0, help="Frame index used as rest reference (default: 0).")
+
+    ap.add_argument("--root-name", default="Root", help="Target root bone name (default: Root).")
+    ap.add_argument("--hips-name", default="Hips", help="Target hips bone name (default: Hips).")
+    ap.add_argument("--source-hips-name", default="mixamorig:Hips", help="Source hips bone name (default: mixamorig:Hips).")
+
+    ap.add_argument("--take", default=None, help="Source AnimStack name to use. Default: first stack.")
+    ap.add_argument("--out-take", default="Retargeted", help="Name of new AnimStack in output (default: Retargeted).")
+
+    ap.add_argument(
+        "--no-convert-space",
+        action="store_true",
+        help="Do NOT convert source axis/unit to match target. Default: convert source->target."
+    )
+
+    ap.add_argument(
+        "--root-motion-axes",
+        default="XZ",
+        help="Axes of target Root translation to drive from source hips (default: XZ). Use e.g. 'XYZ', 'XZ', ''."
+    )
+    ap.add_argument(
+        "--hips-translation-axes",
+        default="Y",
+        help="Axes of target Hips translation to keep (default: Y). Use '' for none."
+    )
+
+    ap.add_argument("-v", "--verbose", action="store_true", help="Verbose logging.")
+
+    # Debug options
+    ap.add_argument(
+        "--list-bones",
+        action="store_true",
+        help="List all skeleton bones in source and target, then exit."
+    )
+    ap.add_argument(
+        "--debug-frame",
+        type=int,
+        default=None,
+        help="Dump detailed debug info for a specific frame, then exit."
+    )
+
+    args = ap.parse_args()
+
+    mapping = parse_mapping_file(args.map)
+
+    # Create FBX managers/scenes
+    src_mgr, src_scene = create_manager_and_scene("SourceScene")
+    src_tpose_mgr, src_tpose_scene = create_manager_and_scene("SourceTPose")
+    tgt_mgr, tgt_scene = create_manager_and_scene("TargetScene")
+
+    # Load scenes
+    load_scene(src_mgr, src_scene, args.source)
+    load_scene(src_tpose_mgr, src_tpose_scene, args.source_tpose)
+    load_scene(tgt_mgr, tgt_scene, args.target_tpose)
+
+    # Debug: list bones
+    if args.list_bones:
+        list_skeleton_bones(src_scene, "SOURCE")
+        list_skeleton_bones(tgt_scene, "TARGET")
+        return
+
+    # Debug: frame dump
+    if args.debug_frame is not None:
+        if not args.no_convert_space:
+            convert_source_to_target_space(src_scene, tgt_scene)
+        debug_frame_dump(
+            src_scene, tgt_scene, mapping,
+            args.debug_frame, args.fps, args.source_hips_name
+        )
+        return
+
+    cfg = RetargetConfig(
+        fps=args.fps,
+        rest_frame=args.rest_frame,
+        root_name=args.root_name,
+        hips_name=args.hips_name,
+        source_hips_name=args.source_hips_name,
+        anim_stack_name=args.take,
+        convert_space=(not args.no_convert_space),
+        root_motion_axes=args.root_motion_axes,
+        hips_translation_axes=args.hips_translation_axes,
+        out_stack_name=args.out_take,
+        verbose=args.verbose,
+        use_animated_rest=True,  # Always use animated rest with T-pose files
+        source_tpose_scene=src_tpose_scene
+    )
+
+    retarget_mixamo_to_custom(src_scene, tgt_scene, mapping, cfg)
+
+    # Save output
+    save_scene(tgt_mgr, tgt_scene, args.out)
+
+    print(f"Saved retargeted FBX: {args.out}")
+
+
+if __name__ == "__main__":
+    main()

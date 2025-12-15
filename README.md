@@ -798,6 +798,133 @@ Combining a character model with Mixamo animations:
 
 ---
 
+# retarget-mixamo
+
+A Python command-line tool for retargeting Mixamo animations onto custom rigs. Transfers animation data from Mixamo-style skeletons to your own character rig using bone mapping.
+
+## Features
+
+- **Local Rotation Delta Method**: Works even when source and target skeletons have different global orientations at rest (e.g., different T-pose arm angles)
+- **Bone Mapping**: Uses a JSON or text mapping file to match source bones to target bones
+- **Root Motion Support**: Derives root motion from Mixamo Hips when target has a Root bone that Mixamo lacks
+- **Axis/Unit Conversion**: Automatically converts source axis system and units to match target
+- **Scale Compensation**: Computes scale from hip heights to handle skeletons with different world scales
+- **Flexible Input**: Supports JSON mapping files or simple text files with `->`, `→`, or `=` syntax
+
+## Requirements
+
+- Python 3.x
+- Autodesk FBX SDK Python bindings
+
+## Usage
+
+```bash
+python3 retarget-mixamo --source <animation.fbx> --source-tpose <source_tpose.fbx> \
+                        --target-tpose <target_tpose.fbx> --map <mapping.json> --out <output.fbx>
+```
+
+### Required Arguments
+
+| Argument | Description |
+|----------|-------------|
+| `--source` | Mixamo animation FBX (source animation to retarget) |
+| `--source-tpose` | Mixamo T-pose FBX (source skeleton reference pose) |
+| `--target-tpose` | Custom rig T-pose FBX (target skeleton reference pose) |
+| `--map` | Bone mapping file (JSON or text format) |
+| `--out` | Output FBX path (target with retargeted animation) |
+
+### Optional Arguments
+
+| Argument | Default | Description |
+|----------|---------|-------------|
+| `--fps` | 30 | Sampling FPS for baking animation |
+| `--rest-frame` | 0 | Frame index used as rest reference |
+| `--root-name` | Root | Target root bone name |
+| `--hips-name` | Hips | Target hips bone name |
+| `--source-hips-name` | mixamorig:Hips | Source hips bone name |
+| `--take` | (first) | Source AnimStack name to use |
+| `--out-take` | Retargeted | Name of new AnimStack in output |
+| `--no-convert-space` | | Don't convert source axis/unit to match target |
+| `--root-motion-axes` | XZ | Axes of target Root translation to drive from source hips |
+| `--hips-translation-axes` | Y | Axes of target Hips translation to keep |
+| `-v, --verbose` | | Verbose logging |
+| `--list-bones` | | List all skeleton bones in source and target, then exit |
+| `--debug-frame` | | Dump detailed debug info for a specific frame |
+
+### Mapping File Format
+
+**JSON format:**
+```json
+{
+  "mixamorig:Hips": "Hips",
+  "mixamorig:Spine": "Spine",
+  "mixamorig:Spine1": "Spine1",
+  "mixamorig:LeftArm": "LeftArm"
+}
+```
+
+**Text format** (using `->`, `→`, or `=`):
+```
+mixamorig:Hips -> Hips
+mixamorig:Spine -> Spine
+mixamorig:LeftArm = LeftArm
+```
+
+### Examples
+
+Basic retargeting:
+```bash
+python3 retarget-mixamo \
+  --source mixamo_walk.fbx \
+  --source-tpose mixamo_tpose.fbx \
+  --target-tpose mycharacter_tpose.fbx \
+  --map bone_mapping.json \
+  --out mycharacter_walk.fbx
+```
+
+List bones to help create mapping file:
+```bash
+python3 retarget-mixamo \
+  --source mixamo_walk.fbx \
+  --source-tpose mixamo_tpose.fbx \
+  --target-tpose mycharacter_tpose.fbx \
+  --map empty.json \
+  --out /dev/null \
+  --list-bones
+```
+
+Retarget with custom root motion settings:
+```bash
+python3 retarget-mixamo \
+  --source mixamo_run.fbx \
+  --source-tpose mixamo_tpose.fbx \
+  --target-tpose mycharacter_tpose.fbx \
+  --map bone_mapping.json \
+  --out mycharacter_run.fbx \
+  --root-motion-axes ""
+```
+
+## How It Works
+
+1. **Load Scenes**: Loads source animation, source T-pose, and target T-pose FBX files
+2. **Build Bone Mapping**: Parses the mapping file to create source→target bone correspondence
+3. **Compute Rest Poses**: Extracts local rest rotations for all mapped bones in both skeletons
+4. **Calculate Scale**: Determines scale factor from hip height difference between skeletons
+5. **For Each Frame**:
+   - Computes local rotation delta: `Qdelta = Q_source_local * inverse(Q_source_rest)`
+   - Applies delta to target rest pose: `Q_target = Qdelta * Q_target_rest`
+   - Handles root motion by extracting XZ movement from source hips
+6. **Write Animation**: Creates new AnimStack with baked rotation/translation curves
+
+## Notes
+
+- Works best when both skeletons are in similar T-poses
+- Skips missing bone pairs with warnings
+- Handles PreRotation/PostRotation by working in matrices and decomposing at the end
+- Root motion is derived from Mixamo Hips movement when target has a Root bone
+
+---
+
 ## Acknowledgments
 
 - Built using Pixar's Universal Scene Description (USD)
