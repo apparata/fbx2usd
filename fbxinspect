@@ -448,6 +448,72 @@ def get_material_info(scene):
     return materials
 
 
+def compute_scene_bounding_box(scene):
+    """Compute the axis-aligned bounding box for the entire scene."""
+    min_point = [float('inf'), float('inf'), float('inf')]
+    max_point = [float('-inf'), float('-inf'), float('-inf')]
+    has_geometry = False
+
+    root_node = scene.GetRootNode()
+
+    def get_node_global_transform(node):
+        """Get the global transform matrix for a node."""
+        return node.EvaluateGlobalTransform()
+
+    def update_bounds(point):
+        """Update bounding box with a point."""
+        nonlocal has_geometry
+        has_geometry = True
+        for i in range(3):
+            min_point[i] = min(min_point[i], point[i])
+            max_point[i] = max(max_point[i], point[i])
+
+    def process_node(node):
+        if not node:
+            return
+
+        attr = node.GetNodeAttribute()
+        if attr:
+            attr_type = attr.GetAttributeType()
+
+            # Process mesh vertices
+            if attr_type == FbxNodeAttribute.EType.eMesh:
+                mesh = node.GetMesh()
+                if mesh:
+                    global_transform = get_node_global_transform(node)
+                    for i in range(mesh.GetControlPointsCount()):
+                        local_point = mesh.GetControlPointAt(i)
+                        # Transform point to global space
+                        global_point = global_transform.MultT(FbxVector4(local_point[0], local_point[1], local_point[2], 1.0))
+                        update_bounds([global_point[0], global_point[1], global_point[2]])
+
+            # Process skeleton joints (use their global position)
+            elif attr_type == FbxNodeAttribute.EType.eSkeleton:
+                global_transform = get_node_global_transform(node)
+                translation = global_transform.GetT()
+                update_bounds([translation[0], translation[1], translation[2]])
+
+        # Process children
+        for i in range(node.GetChildCount()):
+            process_node(node.GetChild(i))
+
+    process_node(root_node)
+
+    if not has_geometry:
+        return None
+
+    # Calculate size and center
+    size = [max_point[i] - min_point[i] for i in range(3)]
+    center = [(min_point[i] + max_point[i]) / 2 for i in range(3)]
+
+    return {
+        'min': min_point,
+        'max': max_point,
+        'center': center,
+        'size': size,
+    }
+
+
 def print_markdown_table(headers, rows):
     """Print a markdown table with aligned columns."""
     if not rows:
@@ -511,6 +577,21 @@ def print_default_output(filepath, scene, verbose=False):
         node_rows.append(["Lights", counts['lights']])
     print_markdown_table(["Type", "Count"], node_rows)
     print()
+
+    # Bounding box
+    bbox = compute_scene_bounding_box(scene)
+    if bbox:
+        print("## Bounding Box")
+        print()
+        unit_name = info['unit_name']
+        bbox_rows = [
+            ["Min", f"({bbox['min'][0]:.2f}, {bbox['min'][1]:.2f}, {bbox['min'][2]:.2f})"],
+            ["Center", f"({bbox['center'][0]:.2f}, {bbox['center'][1]:.2f}, {bbox['center'][2]:.2f})"],
+            ["Max", f"({bbox['max'][0]:.2f}, {bbox['max'][1]:.2f}, {bbox['max'][2]:.2f})"],
+            ["Size", f"{bbox['size'][0]:.2f} x {bbox['size'][1]:.2f} x {bbox['size'][2]:.2f} {unit_name}"],
+        ]
+        print_markdown_table(["Property", "Value"], bbox_rows)
+        print()
 
     # Node hierarchy
     print("## Node Hierarchy")

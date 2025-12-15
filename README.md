@@ -276,6 +276,7 @@ A Python command-line tool for inspecting USD files (usda/usdc/usdz) and display
 
 - **Stage Information**: Displays format, FPS, time range, up axis, and meters per unit
 - **Prim Summary**: Counts meshes, materials, skeletons, and other prim types
+- **Bounding Box**: Computes axis-aligned bounding box for the entire scene
 - **Prim Hierarchy**: ASCII tree visualization of the scene graph
 - **Skeleton Hierarchy**: Displays bone/joint hierarchy for skeletal models
 - **RealityKit Animation Libraries**: Lists animation names and source files
@@ -422,6 +423,7 @@ A Python command-line tool for inspecting FBX files and displaying scene hierarc
 
 - **Scene Information**: Displays FPS, up axis, coordinate system, and unit scale
 - **Node Summary**: Counts meshes, skeleton bones, materials, and textures
+- **Bounding Box**: Computes axis-aligned bounding box for the entire scene
 - **Node Hierarchy**: ASCII tree visualization of the scene graph with node types
 - **Skeleton Hierarchy**: Displays bone/joint hierarchy for skeletal models
 - **Mesh Details**: Shows vertex count, polygon count, UV sets, skinning, and blend shapes
