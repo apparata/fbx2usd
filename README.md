@@ -1,5 +1,42 @@
 # fbx2usd
 
+A toolsuite for working with FBX and USD files, with a focus on Apple RealityKit compatibility. The tools are primarily meant for developers that don't have access to or experience from DCC tools, such as Maya and Blender. Many indie developers rely on 3rd-party 3D content from various asset stores. The focus on FBX as a source format is based on its frequent use on asset stores.
+
+Where it makes sense, the tools use USD extensions specific for RealityKit, such as animation libraries and MaterialX materials.
+
+Note: The tools are under active development, but are already useful in their current form. 
+
+**Key capabilities:**
+
+- **Format Conversion**: Convert FBX files to USD with full support for skeletal and non-skeletal animations, materials, and textures
+- **Multiple Animations**: Convert multi-take FBX animations to separate USD animations, referencing a single mesh to allow RealityKit to load multiple animations for a single model without the duplicate mesh data bloat or having to write extra code. 
+- **Inspection**: Examine the contents of both FBX and USD files, including scene hierarchy, skeletons, animations, and materials
+- **Coordinate System Conversion**: Convert between different axis conventions (Y-up, Z-up, left/right-handed)
+- **Unit Conversion**: Change between unit systems (meters, centimeters, etc.) with or without scaling geometry
+- **Animation Merging**: Combine animation takes from multiple FBX files
+- **Animation Retargeting**: Transfer humanoid Mixamo animations to custom character rigs, with planned support for other humanoid skeleton animations
+
+These tools are particularly useful when preparing assets from various sources (Blender, Maya, Mixamo, asset stores, etc.) for use in RealityKit applications.
+
+## Tools
+
+- [fbx2usd](#fbx2usd-converter) - Convert FBX files to USD format
+- [usdinspect](#usdinspect) - Inspect USD files and display scene information
+- [fbxinspect](#fbxinspect) - Inspect FBX files and display scene information
+- [fbxunit](#fbxunit) - Convert FBX files between unit systems
+- [fbxscale](#fbxscale) - Scale FBX geometry by a factor
+- [fbxaxisconvert](#fbxaxisconvert) - Convert FBX files between coordinate systems
+- [retarget-mixamo](#retarget-mixamo) - Retarget Mixamo animations to custom rigs
+- [append-fbx-skeletal-animation](#append-fbx-skeletal-animation) - Merge animation takes between FBX files
+
+## License
+
+The toolsuite source code is licensed under the 0BSD License - see the [LICENSE](LICENSE) file for details. The tools depend on the FBX SDK and USD SDK, and all dependencies retain their respective licenses.
+
+---
+
+# fbx2usd Converter
+
 A Python command-line tool for converting FBX files to USD (Universal Scene Description) format, optimized for Apple's RealityKit framework. Supports both skeletal and non-skeletal models with animations.
 
 ## Features
@@ -11,13 +48,13 @@ A Python command-line tool for converting FBX files to USD (Universal Scene Desc
 - **Directory Structure**: Optional organized output with `Textures/` and `Animations/` subdirectories
 - **RealityKit Compatible**: Creates animation libraries with clip definitions for both skeletal and non-skeletal models
 - **PBR Materials**: Converts materials with support for:
-  - Diffuse/Albedo textures
-  - Normal maps
-  - Roughness maps
-  - Metallic maps
-  - Emissive maps
-  - Ambient Occlusion maps
-- **MaterialX Support**: Optional MaterialX shader export for Reality Composer Pro ShaderGraph compatibility
+    - Diffuse/Albedo textures
+    - Normal maps
+    - Roughness maps
+    - Metallic maps
+    - Emissive maps
+    - Ambient Occlusion maps
+- **MaterialX Support**: Optional MaterialX material export for Reality Composer Pro ShaderGraph compatibility
 - **Mesh Export**: Exports geometry with normals and multiple UV sets
 - **Skinning Weights**: Preserves skinning data (up to 4 influences per vertex) for skeletal models
 - **Static Model Support**: Exports models without animations as simple static geometry
@@ -198,30 +235,30 @@ All USD references are automatically updated to point to the correct subdirector
 The converter performs the following operations:
 
 1. **Scene Loading**:
-   - Loads the FBX file using the Autodesk FBX SDK
-   - Converts to OpenGL coordinate system (Y-up)
+    - Loads the FBX file using the Autodesk FBX SDK
+    - Converts to OpenGL coordinate system (Y-up)
 2. **Model Type Detection**:
-   - Automatically detects whether the model has a skeleton
-   - Routes to appropriate export path (skeletal or non-skeletal)
+    - Automatically detects whether the model has a skeleton
+    - Routes to appropriate export path (skeletal or non-skeletal)
 3. **Skeleton Export** (for skeletal models):
-   - Extracts skeletal hierarchy
-   - Preserves bind transforms and rest poses
+    - Extracts skeletal hierarchy
+    - Preserves bind transforms and rest poses
 4. **Mesh Export**:
-   - Exports geometry with proper vertex ordering
-   - Includes normals and multiple UV sets
-   - Preserves skinning weights and joint influences (skeletal models only)
+    - Exports geometry with proper vertex ordering
+    - Includes normals and multiple UV sets
+    - Preserves skinning weights and joint influences (skeletal models only)
 5. **Material Conversion**:
-   - Creates USD Preview Surface materials (default) or MaterialX shaders (`-m` flag)
-   - Maps FBX material properties to PBR parameters
-   - References texture files with proper paths
+    - Creates USD Preview Surface materials (default) or MaterialX shaders (`-m` flag)
+    - Maps FBX material properties to PBR parameters
+    - References texture files with proper paths
 6. **Animation Export**:
-   - Default mode: Concatenates all animation takes into a single timeline
-   - Separate mode (`-s`): Creates individual files per animation with RealityKit AnimationLibrary
-   - Skeletal models: Samples joint transformations
-   - Non-skeletal models: Samples mesh transform operations (translate, rotate, scale)
-   - Creates RealityKit animation library with clip definitions
+    - Default mode: Concatenates all animation takes into a single timeline
+    - Separate mode (`-s`): Creates individual files per animation with RealityKit AnimationLibrary
+    - Skeletal models: Samples joint transformations
+    - Non-skeletal models: Samples mesh transform operations (translate, rotate, scale)
+    - Creates RealityKit animation library with clip definitions
 7. **USD Writing**:
-   - Outputs the complete scene in USD format
+    - Outputs the complete scene in USD format
 
 ## Limitations
 
@@ -256,10 +293,6 @@ Both model types support:
 - Multiple animation takes
 - Concatenated or separate animation export
 - RealityKit AnimationLibrary generation
-
-## License
-
-This project is licensed under the 0BSD License - see the [LICENSE](LICENSE) file for details.
 
 ## Dependencies and Licenses
 
@@ -550,6 +583,7 @@ A Python command-line tool for converting an FBX file from one unit system to an
 ## Purpose
 
 Convert FBX files between different unit systems (e.g., centimeters to meters). By default, the tool uses the FBX SDK's built-in unit conversion which properly scales:
+  
 - Vertex positions
 - Node transforms (translations)
 - Animation curves (translation keyframes)
@@ -685,6 +719,7 @@ Done!
 ## How It Works
 
 The tool uses a clever trick with the FBX SDK:
+
 1. Temporarily converts to a different unit scale (which scales all geometry)
 2. Restores the original unit metadata without scaling
 
@@ -693,6 +728,7 @@ This achieves the effect of scaling geometry while preserving the unit setting.
 ## When to Use
 
 Use `fbxscale` when:
+
 - A model has the correct unit (e.g., meters) but is 100x too large
 - You need to resize a model without changing its unit metadata
 - You're preparing models from different sources to be the same scale
@@ -871,11 +907,11 @@ Combining a character model with Mixamo animations:
 2. Analyzes skeleton hierarchies to build bone name mappings
 3. Detects coordinate system differences (Z-up vs Y-up) and calculates rotation offsets
 4. For each animation stack in the source file:
-   - Creates a new animation stack in the destination
-   - Copies all animation layers with their properties
-   - Transfers keyframe data for translation, rotation, and scale
-   - Applies coordinate system transformations and scale adjustments
-   - Bakes PreRotation differences into animation curves
+    - Creates a new animation stack in the destination
+    - Copies all animation layers with their properties
+    - Transfers keyframe data for translation, rotation, and scale
+    - Applies coordinate system transformations and scale adjustments
+    - Bakes PreRotation differences into animation curves
 5. Saves the merged result to a new FBX file
 
 ## Notes
@@ -889,6 +925,8 @@ Combining a character model with Mixamo animations:
 # retarget-mixamo
 
 A Python command-line tool for retargeting Mixamo animations onto custom rigs. Transfers animation data from Mixamo-style skeletons to your own character rig using bone mapping.
+
+The goal is to create a more generate humanoid animation retargeting tool, but for now, the focus is on free Mixamo animations.
 
 ## Features
 
@@ -999,9 +1037,9 @@ python3 retarget-mixamo \
 3. **Compute Rest Poses**: Extracts local rest rotations for all mapped bones in both skeletons
 4. **Calculate Scale**: Determines scale factor from hip height difference between skeletons
 5. **For Each Frame**:
-   - Computes local rotation delta: `Qdelta = Q_source_local * inverse(Q_source_rest)`
-   - Applies delta to target rest pose: `Q_target = Qdelta * Q_target_rest`
-   - Handles root motion by extracting XZ movement from source hips
+    - Computes local rotation delta: `Qdelta = Q_source_local * inverse(Q_source_rest)`
+    - Applies delta to target rest pose: `Q_target = Qdelta * Q_target_rest`
+    - Handles root motion by extracting XZ movement from source hips
 6. **Write Animation**: Creates new AnimStack with baked rotation/translation curves
 
 ## Notes
