@@ -9,7 +9,8 @@ Note: The tools are under active development, but are already useful in their cu
 **Key capabilities:**
 
 - **Format Conversion**: Convert FBX files to USD with full support for skeletal and non-skeletal animations, materials, and textures
-- **Multiple Animations**: Convert multi-take FBX animations to separate USD animations, referencing a single mesh to allow RealityKit to load multiple animations for a single model without the duplicate mesh data bloat or having to write extra code. 
+- **Multiple Animations**: Convert multi-take FBX animations to separate USD animations, referencing a single mesh to allow RealityKit to load multiple animations for a single model without the duplicate mesh data bloat or having to write extra code
+- **MaterialX ShaderGraph**: Convert FBX PBR materials to MaterialX ShaderGraph materials
 - **Inspection**: Examine the contents of both FBX and USD files, including scene hierarchy, skeletons, animations, and materials
 - **Coordinate System Conversion**: Convert between different axis conventions (Y-up, Z-up, left/right-handed)
 - **Unit Conversion**: Change between unit systems (meters, centimeters, etc.) with or without scaling geometry
