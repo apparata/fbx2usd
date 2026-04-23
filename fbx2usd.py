@@ -605,15 +605,21 @@ def convert_fbx_to_usd(fbx_path, usd_path, use_materialx=False, use_directory_st
             normal_elem = fbx_mesh.GetElementNormal()
             if normal_elem:
                 normals = []
+                normal_mapping = normal_elem.GetMappingMode()
+                normal_ref = normal_elem.GetReferenceMode()
+                pv_idx = 0
                 for p in range(fbx_mesh.GetPolygonCount()):
                     for v in range(fbx_mesh.GetPolygonSize(p)):
-                        idx = p * fbx_mesh.GetPolygonSize(p) + v
-                        if normal_elem.GetReferenceMode() == FbxLayerElement.EReferenceMode.eDirect:
+                        if normal_mapping == FbxLayerElement.EMappingMode.eByControlPoint:
+                            idx = fbx_mesh.GetPolygonVertex(p, v)
+                        else:
+                            idx = pv_idx
+                        if normal_ref == FbxLayerElement.EReferenceMode.eDirect:
                             n = normal_elem.GetDirectArray().GetAt(idx)
                         else:
-                            i = normal_elem.GetIndexArray().GetAt(idx)
-                            n = normal_elem.GetDirectArray().GetAt(i)
+                            n = normal_elem.GetDirectArray().GetAt(normal_elem.GetIndexArray().GetAt(idx))
                         normals.append(Gf.Vec3f(n[0], n[1], n[2]))
+                        pv_idx += 1
 
                 if normals:
                     usd_mesh.CreateNormalsAttr().Set(normals)
@@ -1453,15 +1459,21 @@ def export_meshes(stage, geom_path, skel_path, model_name, scene, mesh_nodes, jo
         normal_elem = fbx_mesh.GetElementNormal()
         if normal_elem:
             normals = []
+            normal_mapping = normal_elem.GetMappingMode()
+            normal_ref = normal_elem.GetReferenceMode()
+            pv_idx = 0
             for p in range(fbx_mesh.GetPolygonCount()):
                 for v in range(fbx_mesh.GetPolygonSize(p)):
-                    idx = p * fbx_mesh.GetPolygonSize(p) + v
-                    if normal_elem.GetReferenceMode() == FbxLayerElement.EReferenceMode.eDirect:
+                    if normal_mapping == FbxLayerElement.EMappingMode.eByControlPoint:
+                        idx = fbx_mesh.GetPolygonVertex(p, v)
+                    else:
+                        idx = pv_idx
+                    if normal_ref == FbxLayerElement.EReferenceMode.eDirect:
                         n = normal_elem.GetDirectArray().GetAt(idx)
                     else:
-                        i = normal_elem.GetIndexArray().GetAt(idx)
-                        n = normal_elem.GetDirectArray().GetAt(i)
+                        n = normal_elem.GetDirectArray().GetAt(normal_elem.GetIndexArray().GetAt(idx))
                     normals.append(Gf.Vec3f(n[0], n[1], n[2]))
+                    pv_idx += 1
 
             if normals:
                 usd_mesh.CreateNormalsAttr().Set(normals)
@@ -1820,15 +1832,21 @@ def export_meshes_no_skeleton(stage, geom_path, model_name, scene, mesh_nodes, i
         normal_elem = fbx_mesh.GetElementNormal()
         if normal_elem:
             normals = []
+            normal_mapping = normal_elem.GetMappingMode()
+            normal_ref = normal_elem.GetReferenceMode()
+            pv_idx = 0
             for p in range(fbx_mesh.GetPolygonCount()):
                 for v in range(fbx_mesh.GetPolygonSize(p)):
-                    idx = p * fbx_mesh.GetPolygonSize(p) + v
-                    if normal_elem.GetReferenceMode() == FbxLayerElement.EReferenceMode.eDirect:
+                    if normal_mapping == FbxLayerElement.EMappingMode.eByControlPoint:
+                        idx = fbx_mesh.GetPolygonVertex(p, v)
+                    else:
+                        idx = pv_idx
+                    if normal_ref == FbxLayerElement.EReferenceMode.eDirect:
                         n = normal_elem.GetDirectArray().GetAt(idx)
                     else:
-                        i = normal_elem.GetIndexArray().GetAt(idx)
-                        n = normal_elem.GetDirectArray().GetAt(i)
+                        n = normal_elem.GetDirectArray().GetAt(normal_elem.GetIndexArray().GetAt(idx))
                     normals.append(Gf.Vec3f(n[0], n[1], n[2]))
+                    pv_idx += 1
 
             if normals:
                 usd_mesh.CreateNormalsAttr().Set(normals)
